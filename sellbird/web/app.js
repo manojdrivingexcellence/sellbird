@@ -2,7 +2,7 @@ let currentTab = 'today';
 let companyDrill = false;      // true while viewing a single company's contacts
 let _companies = [], _prospects = [], _campaigns = [];
 let _signals = null;           // last /api/signals payload, for the cohort builder
-let _desk = { items: [], i: 0 };
+let _desk = { items: [], i: 0, selected: new Set() };
 
 // ── Appearance ──
 //
@@ -516,10 +516,18 @@ async function loadLiveStatus() {
     ? '<div class="banner bad" style="margin:8px 0 0">' + icon('alert') + '<p style="color:inherit">' +
       (d.stopped || []).map(r => escHtml(jobName(r))).join(', ') + ' stopped before finishing.</p></div>'
     : '';
+  const loop = d.loop_status;
+  const loopHtml = loop && loop.detail
+    ? '<div class="banner ' + (loop.phase === 'interval' ? 'good' : 'wait') +
+      '" style="margin:8px 0 0">' + icon('alert') + '<p style="color:inherit">' +
+      escHtml(loop.detail) + (loop.next_check_at ? ' Next check: ' +
+      escHtml(new Date(loop.next_check_at).toLocaleTimeString()) + '.' : '') + '</p></div>'
+    : '';
   el.innerHTML =
     '<div class="live-head">' + runningHtml +
       '<span class="setup-pct">Cost so far $' + Number(d.cost_usd || 0).toFixed(2) + '</span></div>' +
     stoppedHtml +
+    loopHtml +
     '<div class="steps">' + rows + '</div>' +
     (d.next ? '<div class="live-next">' + icon('arrow') + '<span><b>Next</b> · ' + escHtml(d.next) + '</span>' +
       (d.next_tab ? '<button class="btn btn-secondary btn-sm" onclick="goTab(' + jsq(d.next_tab) + ')">Go</button>' : '') +
@@ -1723,6 +1731,8 @@ async function loadOutbox() {
 
   const pending = data.pending || [];
   _desk.items = pending;
+  _desk.selected = new Set([..._desk.selected].filter(id =>
+    pending.some(p => p.id === id && !heldReason(p))));
   _desk.footer = data.footer || '';
   // Keep the desk on the draft being edited even if the list shifted.
   const editingAt = _desk.editing ? pending.findIndex(p => p.id === _desk.editing) : -1;
@@ -1735,6 +1745,9 @@ async function loadOutbox() {
   navCount('nav-outbox', pending.length);
 
   actions.innerHTML =
+    (_desk.selected.size
+      ? '<button id="approve-selected" class="btn btn-primary btn-sm" onclick="outboxApproveSelected()">Approve selected ' +
+        _desk.selected.size + '</button>' : '') +
     (pending.length && !data.paused
       ? (pending.length > pending.filter(p => heldReason(p)).length
         ? '<button class="btn btn-primary btn-sm" onclick="outboxApproveAll()" ' +
@@ -1953,6 +1966,7 @@ function renderDesk(items, i) {
     return '<div class="desk-item ' + (n === i ? 'active' : '') + '" onclick="deskGo(' + n + ')">' +
       '<span class="avatar">' + initials(parts[0], parts[1]) + '</span>' +
       '<div class="di-text"><div class="to">' + escHtml(who) +
+        (_desk.selected.has(it.id) ? ' <span class="tag t-good">Selected</span>' : '') +
         (heldReason(it) ? ' <span class="tag t-bad" title="Sellbird held this instead of sending it">Held</span>' : '') +
         '</div>' +
       '<div class="sub">' + escHtml(it.subject || '(no subject)') + '</div></div>' +
@@ -1983,6 +1997,8 @@ function renderDesk(items, i) {
       '<button class="btn btn-secondary" onclick="deskEdit(null)">Cancel</button>'
     : '<button class="btn btn-primary" onclick="outboxAct(' + jsq(cur.id) + ',\'approve\')">' +
         'Approve <kbd>A</kbd></button>' +
+      (!heldReason(cur) ? '<button class="btn btn-secondary" onclick="deskSelect(' + jsq(cur.id) + ')">' +
+        (_desk.selected.has(cur.id) ? 'Remove from batch' : 'Select for batch') + '</button>' : '') +
       '<button class="btn btn-secondary" onclick="deskEdit(' + jsq(cur.id) + ')">' +
         'Edit <kbd>E</kbd></button>' +
       '<button class="btn btn-secondary" onclick="outboxAct(' + jsq(cur.id) + ',\'reject\')">' +
@@ -2060,6 +2076,25 @@ function deskGo(n) {
   document.getElementById('outbox-desk').innerHTML = renderDesk(_desk.items, n);
 }
 
+function deskSelect(id) {
+  if (deskBusy()) return;
+  const item = _desk.items.find(p => p.id === id);
+  if (!item || heldReason(item)) return;
+  if (_desk.selected.has(id)) _desk.selected.delete(id);
+  else _desk.selected.add(id);
+  document.getElementById('outbox-desk').innerHTML = renderDesk(_desk.items, _desk.i);
+  const old = document.getElementById('approve-selected');
+  if (old) old.remove();
+  if (_desk.selected.size) {
+    const button = document.createElement('button');
+    button.id = 'approve-selected';
+    button.className = 'btn btn-primary btn-sm';
+    button.textContent = 'Approve selected ' + _desk.selected.size;
+    button.onclick = outboxApproveSelected;
+    document.getElementById('outbox-actions').prepend(button);
+  }
+}
+
 // Keyboard review. Ignored while typing into a field, so Settings still works.
 document.addEventListener('keydown', e => {
   if (currentTab !== 'outbox' || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -2097,6 +2132,21 @@ async function outboxApproveAll() {
     ? ' ' + data.held + ' Sellbird held ' + (data.held === 1 ? 'is' : 'are') + ' left for you to read and approve one by one.'
     : ''), 'success');
   else showToast(failMsg(data, 'Approve-all failed.'), 'error');
+  loadOutbox();
+}
+
+async function outboxApproveSelected() {
+  if (deskBusy() || !_desk.selected.size) return;
+  const ids = [..._desk.selected];
+  const data = await api('/api/outbox/approve-selected', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ids}),
+  });
+  if (data && data.success) {
+    showToast('Approved ' + data.approved + ' selected email(s).' +
+      (data.skipped ? ' ' + data.skipped + ' no longer pending; review them individually.' : ''), 'success');
+    _desk.selected.clear();
+  } else showToast(failMsg(data, 'Selected approval failed.'), 'error');
   loadOutbox();
 }
 
