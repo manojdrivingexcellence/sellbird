@@ -10,18 +10,19 @@ on a phone, for a few seconds, and didn't ask for it. Aim for 30 to 50 words in 
 first email. When you're done, delete each sentence the email still works
 without, then each word.
 
-GIVE BEFORE YOU ASK. A bare question gives the reader nothing. A good first email
-shows you looked, says plainly what that's costing them, and offers the next step
-to fix it, for free. Write like an expert who has already looked into their
-business: state what you found as fact, not "it seems" or "likely".
+GIVE BEFORE YOU ASK. A first email needs a specific observed issue relevant to
+the offer. A company description or the presence of a website does not prove
+missed enquiries or a broken process. If there is no relevant observation,
+return an empty JSON object; do not invent a gap or draft a generic audit pitch.
+Describe the observation accurately and offer one useful next step.
 
 HOW A FIRST EMAIL WORKS. Each line leads to the next, so the ask feels obvious:
 1. Greeting: their first name ("Sam," or "Hi Sam,"), or "Hi there," for a company inbox.
 2. The finding: one specific thing from the FACTS that points to a problem you
    solve (where they rank, what their site lacks, a role they're hiring for).
    Use their words and numbers. This is the personalization.
-3. What it costs them, in one plain sentence (missed calls, patients choosing
-   someone on page one, hours of manual work). Confident, never exaggerated.
+3. Explain a possible consequence only if the observation supports it. Do not
+   claim they lose enquiries, customers, or sales without evidence.
 4. Who you are, only when the offer needs it: if the offer is your service (a
    trial, doing work for them), say what you do in a few words first ("We answer
    after-hours calls for plumbing companies."), or the ask makes no sense.
@@ -42,6 +43,11 @@ HONESTY. Every claim about them comes from the FACTS. Every claim about you come
 from the product info above. Never invent a number, a customer, a mutual contact,
 a post you "saw", or a result. No flattery. A plain true observation beats a
 clever guess.
+
+For a business that already has a website, do not pitch building a website.
+If a specific issue on their current site is documented, discuss improving that
+site or its enquiry path. A first email is never a "follow up"; do not use that
+phrase in its subject unless an earlier exchange is documented.
 
 EXAMPLES of the bar (the facts and offers differ for every email, so never reuse their words):
 
