@@ -1649,6 +1649,15 @@ class StateManager:
             pass
         return None
 
+    async def has_first_outbox_email(self, campaign_id: str, prospect_id: str) -> bool:
+        """Whether the writer staged a personal first email for this recipient."""
+        async with self._connect() as db:
+            async with db.execute(
+                "SELECT 1 FROM outbox WHERE campaign_id = ? AND prospect_id = ? "
+                "AND step = 1 LIMIT 1", (campaign_id, prospect_id),
+            ) as cursor:
+                return await cursor.fetchone() is not None
+
     async def get_previous_step(self, item: dict) -> dict | None:
         """The email a sequence follow-up follows (same campaign and person,
         one step earlier), or None."""
