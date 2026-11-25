@@ -449,6 +449,7 @@ async function loadToday() {
   navCount('nav-conversations', (data.stats || {}).needs_human || 0);
   _todayStats = data.stats || {};
   renderFigures(_todayStats);
+  loadDailySummary();
 
   const items = data.items || [];
   if (!items.length) {
@@ -474,6 +475,26 @@ async function loadToday() {
         escHtml(it.action) + icon('arrow') + '</button>' +
     '</div>';
   }).join('') + '</div>';
+}
+
+async function loadDailySummary() {
+  const el = document.getElementById('daily-summary');
+  if (!el) return;
+  const data = await api('/api/daily-summary?tz=' + -new Date().getTimezoneOffset());
+  if (!data || !data.totals) return;
+  const t = data.totals;
+  el.innerHTML = '<div class="card" style="margin:16px 0"><b>Focused sessions today · ' +
+    Number(data.sessions || 0) + '</b><p>' + Number(t.companies_found || 0) +
+    ' companies → ' + Number(t.contacts_found || 0) + ' people → ' +
+    Number(t.verified_contacts || 0) + ' verified → ' +
+    Number(t.drafts_ready || 0) + ' drafts ready</p><p class="muted">' +
+    Number(t.missing_email || 0) + ' without email · ' +
+    Number(t.unverified_email || 0) + ' unverified · ' +
+    Number(t.suppressed_email || 0) + ' suppressed · ' +
+    Number(t.model_calls || 0) + ' model calls · $' +
+    (Number(t.search_cost_usd || 0) + Number(t.model_cost_usd || 0)).toFixed(4) +
+    ' search/model cost</p>' + (data.latest || []).map(s => '<p class="muted">' +
+      escHtml(s.phase || '') + ' · ' + escHtml(s.message || '') + '</p>').join('') + '</div>';
 }
 
 // ── Live status: the "what's happening?" answer, kept on screen ──
@@ -1054,6 +1075,7 @@ async function loadContactSession() {
       Number(data.discovery.discover.known_companies || 0) + ' already known · ' +
       Number(data.discovery.discover.excluded || 0) + ' excluded companies · ' +
       Number(data.discovery.discover.junk || 0) + ' unusable results</p>' : '') +
+    (data.discovery_complete ? '<button class="btn btn-ghost btn-sm" onclick="showLeadDecisions()">Why were leads skipped?</button><div id="lead-decisions"></div>' : '') +
     (data.started_at ? '<p class="muted">Started ' + relTime(data.started_at) +
       ' · ' + Number(data.searches || 0) + ' searches' +
       (data.search_cost_usd ? ' · search cost $' + Number(data.search_cost_usd).toFixed(4) : '') +
@@ -1066,6 +1088,7 @@ async function loadContactSession() {
       '<button class="btn btn-secondary btn-sm" onclick="goTab(\'contacts\')">Review contacts</button> ' +
       '<button class="btn btn-secondary btn-sm" onclick="goTab(\'outbox\')">Review drafts</button>') +
     '</div></div>';
+  if (_showLeadDecisions && data.discovery_complete) showLeadDecisions();
 }
 
 async function stopContactSession() {
@@ -1081,6 +1104,28 @@ async function resumeContactSession() {
   showToast(result && result.success ? 'Continuing the saved session.' :
     failMsg(result, 'Could not continue the session.'), result && result.success ? 'success' : 'error');
   loadContactSession();
+}
+
+let _showLeadDecisions = false;
+async function showLeadDecisions() {
+  _showLeadDecisions = true;
+  const el = document.getElementById('lead-decisions');
+  if (!el) return;
+  const data = await api('/api/contact-session/decisions');
+  if (!data) { el.textContent = 'Could not load lead decisions.'; return; }
+  const labels = {not_a_business: 'Not a business', do_not_contact: 'Do not contact',
+    no_stable_identity: 'No stable identity', already_known: 'Already known',
+    duplicate_in_search: 'Repeated search result', missing_email: 'No email found',
+    unverified_email: 'Email not verified', suppressed_email: 'Suppressed address'};
+  const rows = (data.companies || []).map(d => ({name: d.company_name || d.domain,
+    reason: d.reason, url: d.source_url, query: d.query})).concat(
+    (data.contacts || []).map(p => ({name: [p.first_name, p.last_name, p.company].filter(Boolean).join(' · '),
+      reason: p.reason, url: p.source_url, query: p.email || ''})));
+  el.innerHTML = rows.length ? '<div class="table-card"><table><thead><tr><th>Lead</th><th>Reason</th><th>Search / email</th><th>Evidence</th></tr></thead><tbody>' +
+    rows.slice(0, 500).map(r => '<tr><td>' + escHtml(r.name || 'Unnamed result') +
+      '</td><td>' + escHtml(labels[r.reason] || r.reason) + '</td><td>' + escHtml(r.query || '') +
+      '</td><td>' + (safeHref(r.url) ? '<a href="' + safeHref(r.url) + '" target="_blank" rel="noopener noreferrer">Source &#8599;</a>' : '—') +
+      '</td></tr>').join('') + '</tbody></table></div>' : '<p class="muted">No skipped leads were recorded for this session.</p>';
 }
 
 async function runDiscovery() {
@@ -1857,6 +1902,9 @@ function renderDeskContext(ctx) {
     .filter(Boolean).map(escHtml).join(' &middot; ');
   const signals = Object.entries(ctx.signals || {})
     .map(([k, v]) => escHtml(k) + ': <b>' + escHtml(v) + '</b>').join('<br>');
+  const signalSources = (ctx.signal_sources || []).filter(s => safeHref(s.url))
+    .map(s => '<a href="' + safeHref(s.url) + '" target="_blank" rel="noopener noreferrer">' +
+      escHtml(s.label) + ' evidence &#8599;</a>').join(' · ');
   const source = safeHref(ctx.contact_source_url);
   const companySource = safeHref(ctx.company_source_url);
   return '<div class="desk-context">' +
@@ -1870,6 +1918,7 @@ function renderDeskContext(ctx) {
       companySource ? '<a href="' + companySource + '" target="_blank" rel="noopener noreferrer">Company source &#8599;</a>' : ''].filter(Boolean).join(' · ')) +
     row('Email', email) +
     row('Signals', signals) +
+    row('Signal sources', signalSources) +
     row('Campaign', ctx.campaign ? escHtml(ctx.campaign) +
       ' <span class="muted">(how they were found, not a fact about them)</span>' : '') +
     row('Writer notes', escHtml(ctx.notes)) +
@@ -2349,6 +2398,31 @@ function fbCampaign(i) {
 // Search and status filter live outside the table, so the 15-second refresh
 // re-renders rows without losing what you typed.
 let _contactQuery = '', _contactFilter = 'all';
+let _contactEvidenceId = '', _contactEvidence = {};
+async function toggleContactEvidence(id) {
+  _contactEvidenceId = _contactEvidenceId === id ? '' : id;
+  if (_contactEvidenceId && !_contactEvidence[id])
+    _contactEvidence[id] = await api('/api/prospects/' + encodeURIComponent(id) + '/evidence');
+  renderContacts();
+}
+function contactEvidencePanel(data) {
+  if (!data || !data.contact) return '<p class="muted">Evidence could not be loaded.</p>';
+  const p = data.contact, pattern = data.email_pattern;
+  const link = (u, label) => safeHref(u) ? '<a href="' + safeHref(u) +
+    '" target="_blank" rel="noopener noreferrer">' + escHtml(label) + ' &#8599;</a>' : '';
+  return '<div class="desk-context"><b>' + escHtml([p.first_name, p.last_name].filter(Boolean).join(' ')) +
+    ' · ' + escHtml(p.title || 'Role not recorded') + '</b><p>' + escHtml(p.company || '') +
+    ' · ' + escHtml(p.email || 'No email') + ' · ' + escHtml(p.email_status || 'Not verified') + '</p>' +
+    '<p>' + [link(p.source_url, 'Contact source'), link(p.company_source_url, 'Company source'),
+      link(p.website, 'Company website')].filter(Boolean).join(' · ') + '</p>' +
+    (pattern ? '<p>Email domain check: ' + escHtml(pattern.source || 'source unknown') +
+      ' · ' + escHtml(pattern.mx_type || 'MX unknown') +
+      ' · ' + (pattern.is_catch_all === 1 ? 'catch-all' : 'not marked catch-all') + '</p>' : '') +
+    '<p>' + escHtml(p.personalization_notes || '') + '</p>' +
+    (data.signals || []).map(s => '<p>' + escHtml(s.label) + ': ' +
+      escHtml(s.value_text || String(s.value_num ?? '')) + ' ' +
+      link(s.evidence_url, 'Source') + '</p>').join('') + '</div>';
+}
 const CONTACT_FILTERS = [
   ['all', 'All', null],
   ['todo', 'To write', ['new', 'queued']],
@@ -2433,9 +2507,12 @@ function renderContacts() {
         ? '<button class="btn btn-ghost btn-sm" onclick="toggleOptOut(' + i + ')" ' +
           'aria-expanded="' + (_optOut.id === p.id) + '" title="What made Sellbird stop emailing them">' +
           (p.status === 'opted_out' ? 'Why?' : 'Opt-out history') + '</button>' : '') +
+        '<button class="btn btn-ghost btn-sm" onclick="toggleContactEvidence(' + jsq(p.id) + ')">Evidence</button>' +
         '<button class="btn btn-ghost btn-sm row-action" onclick="fbProspect(' + i + ')" ' +
         'title="Leave feedback on this contact">Feedback</button></div></td></tr>';
     if (_optOut.id === p.id) html += '<tr class="detail-row"><td colspan="8">' + optOutPanel(p) + '</td></tr>';
+    if (_contactEvidenceId === p.id) html += '<tr class="detail-row"><td colspan="8">' +
+      contactEvidencePanel(_contactEvidence[p.id]) + '</td></tr>';
   }
   rowsEl.innerHTML = html + '</tbody></table></div>' +
     '<div class="table-foot">' + rows.length + ' of ' + _prospects.length + ' contacts</div>';
@@ -2696,7 +2773,7 @@ async function loadCampaigns() {
 
 // The whole exchange in order: Sellbird's cold emails (from the Outbox), the
 // replies, Sellbird's answers, and any answer still waiting for approval.
-let _convos = [], _convoFilter = 'needs';
+let _convos = [], _replyQueue = [], _convoFilter = 'needs';
 const STAGE_LABELS = {
   initial_outreach: 'Outreach', engaged: 'Engaged', qualifying: 'Qualifying', presenting: 'Presenting',
   negotiating: 'Negotiating', closing: 'Closing', closed_won: 'Won', closed_lost: 'Lost',
@@ -2713,9 +2790,11 @@ const CONVO_FILTERS = [
 
 async function loadConversations() {
   const el = document.getElementById('conversations-list');
-  const data = await api('/api/conversations?awaiting=1');
+  const [data, queue] = await Promise.all([
+    api('/api/conversations?awaiting=1'), api('/api/reply-queue')]);
   if (!data) { el.innerHTML = offlineState(); return; }
   _convos = data;
+  _replyQueue = Array.isArray(queue) ? queue : [];
   if (!data.length) {
     el.innerHTML = emptyState(icon('conversations'), 'No conversations yet',
       'No prospects have replied so far. When they do, the Handler agent classifies each reply and responds — every thread shows up here.');
@@ -2732,7 +2811,13 @@ function setConvoFilter(f) { _convoFilter = f; renderConversations(); }
 function renderConversations() {
   const el = document.getElementById('conversations-list');
   const filter = CONVO_FILTERS.find(f => f[0] === _convoFilter) || CONVO_FILTERS[CONVO_FILTERS.length - 1];
-  const bar = '<div class="toolbar"><div class="segmented" role="group" aria-label="Filter conversations">' +
+  const queue = _replyQueue.length ? '<div class="card"><h3>Reply action queue · ' + _replyQueue.length + '</h3>' +
+    _replyQueue.map(c => '<div class="convo-actions"><b>' + escHtml([c.first_name, c.last_name].filter(Boolean).join(' ') || c.email) +
+      '</b> · ' + escHtml(c.company || '') + ' · ' + escHtml(c.intent || c.status) +
+      (c.status === 'needs_human' ? ' · Reply from your inbox, then use the conversation actions below.' :
+        ' <button class="btn btn-secondary btn-sm" onclick="markReplyReviewed(' + jsq(c.id) + ')">Mark reviewed</button>') +
+      '</div>').join('') + '</div>' : '<div class="card"><p class="muted">No replies need your review.</p></div>';
+  const bar = queue + '<div class="toolbar"><div class="segmented" role="group" aria-label="Filter conversations">' +
     CONVO_FILTERS.map(f => '<button class="' + (f[0] === filter[0] ? 'on' : '') + '" aria-pressed="' + (f[0] === filter[0]) +
       '" onclick="setConvoFilter(\'' + f[0] + '\')">' + f[1] + ' <span class="n">' +
       _convos.filter(f[2]).length + '</span></button>').join('') + '</div></div>';
@@ -2746,6 +2831,13 @@ function renderConversations() {
     return;
   }
   el.innerHTML = bar + shown.map(convoCard).join('');
+}
+
+async function markReplyReviewed(id) {
+  const result = await api('/api/reply-queue/' + encodeURIComponent(id) + '/reviewed', {method: 'POST'});
+  showToast(result && result.success ? 'Reply marked reviewed.' : failMsg(result, 'Could not mark reviewed.'),
+    result && result.success ? 'success' : 'error');
+  loadConversations();
 }
 
 function convoCard(c) {
