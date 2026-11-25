@@ -117,7 +117,8 @@ async def prepare_contacts(state, config, provider, queries, max_spend, goal, pr
     sender.inboxes = await sender._load_inboxes()
     try:
         for campaign in await state.get_campaigns_by_status("draft"):
-            if campaign.id not in before_campaigns:
+            if (campaign.id not in before_campaigns and campaign.prospect_ids
+                    and set(campaign.prospect_ids).issubset(selected)):
                 await sender._stage_campaign_native(campaign, approval_override=True)
     finally:
         sender.inboxes = None
