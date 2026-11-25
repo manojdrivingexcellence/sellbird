@@ -1222,8 +1222,8 @@ async def _with_context(items: list[dict]) -> list[dict]:
 
     people = {r["id"]: r for r in (await query_db(
         "SELECT p.id, p.first_name, p.last_name, p.title, p.source, p.email_status, "
-        "p.score, p.personalization_notes, p.company_id, c.name AS company_name, "
-        "c.domain, c.website, c.description, c.industry AS found_by "
+        "p.score, p.personalization_notes, p.source_url, p.company_id, c.name AS company_name, "
+        "c.domain, c.website, c.description, c.industry AS found_by, c.source_url AS company_source_url "
         "FROM prospects p LEFT JOIN companies c ON c.id = p.company_id "
         f"WHERE p.id IN ({_in(pids)})", tuple(pids)) if pids else [])}
     campaigns = {r["id"]: r["name"] for r in (await query_db(
@@ -1276,6 +1276,8 @@ async def _with_context(items: list[dict]) -> list[dict]:
             "contact": " ".join(x for x in (p.get("first_name"), p.get("last_name")) if x),
             "contact_title": p.get("title", ""),
             "contact_source": p.get("source", ""),
+            "contact_source_url": p.get("source_url", ""),
+            "company_source_url": p.get("company_source_url", ""),
             "email_status": p.get("email_status", ""),
             "score": p.get("score"),
             "notes": p.get("personalization_notes", ""),
@@ -2074,13 +2076,31 @@ async def estimate_discovery(request: Request):
 @app.get("/api/contact-session")
 async def contact_session_status():
     """Progress for the operator-started contact and draft session."""
-    return {**(_contact_session_report or {}),
+    from sellbird.workspace_home import require_self_hosted
+    require_self_hosted("local_discovery")
+    report = _contact_session_report
+    if report is None:
+        state = _state()
+        await state.init_db()
+        try:
+            report = json.loads(await state.get_setting("focused_session_report") or "{}")
+        except (ValueError, TypeError):
+            report = {}
+        if report.get("phase") not in ("done", "paused", "failed", "stopped", "interrupted", None):
+            report.update(phase="interrupted", message="Dashboard restarted during this session. Saved contacts and drafts remain available; choose Continue session to pick up the saved work.")
+            await state.set_setting("focused_session_report", json.dumps(report))
+    public_report = {k: v for k, v in (report or {}).items() if k not in (
+        "baseline_people", "baseline_campaigns", "selected_ids", "usage_start_calls",
+        "usage_start_cost_usd", "segment_started_at")}
+    return {**public_report,
             "running": bool(_contact_session_task and not _contact_session_task.done())}
 
 
 @app.post("/api/contact-session/stop")
 async def stop_contact_session():
     """Stop the focused pass; already saved contacts and drafts remain visible."""
+    from sellbird.workspace_home import require_self_hosted
+    require_self_hosted("local_discovery")
     if not _contact_session_task or _contact_session_task.done():
         return {"success": False, "message": "No focused session is running."}
     state = _state()
@@ -2093,6 +2113,8 @@ async def stop_contact_session():
 @app.post("/api/contact-session")
 async def start_contact_session(request: Request):
     """Run discovery, contact verification and drafting now, without sending."""
+    from sellbird.workspace_home import require_self_hosted
+    require_self_hosted("local_discovery")
     global _contact_session_task, _contact_session_report
     if (_contact_session_task and not _contact_session_task.done()
             or _discovery_task and not _discovery_task.done()):
@@ -2109,6 +2131,18 @@ async def start_contact_session(request: Request):
         body = await request.json()
         if not isinstance(body, dict):
             raise ValueError("Expected session settings.")
+        resume = body.get("resume") is True
+        state = _state()
+        await state.init_db()
+        previous = {}
+        if resume:
+            try:
+                previous = json.loads(await state.get_setting("focused_session_report") or "{}")
+            except (ValueError, TypeError):
+                previous = {}
+            if previous.get("phase") not in ("paused", "stopped", "interrupted", "failed") or not previous.get("settings"):
+                raise ValueError("No paused session is available to continue.")
+            body = previous["settings"]
         goal = body.get("goal", 5)
         if type(goal) is not int or not 1 <= goal <= 10:
             raise ValueError("Choose a goal from 1 to 10 contacts.")
@@ -2126,22 +2160,51 @@ async def start_contact_session(request: Request):
             raise ValueError("Choose a spend cap between $0 and $50.")
         if estimate_cost(provider, queries) > max_spend:
             raise ValueError("Search estimate is over your spend cap. Narrow the search first.")
-        state = _state()
-        await state.init_db()
         await state.set_setting("discovery_paused", "")
-        report = {"phase": "starting", "goal": goal, "verified_contacts": 0,
-                  "drafts_ready": 0, "companies_found": 0, "message": "Starting your session."}
+        usage_before = (await state.usage_totals())["today"]
+        report = {**(previous if resume else {}), "phase": "starting", "goal": goal,
+                  "verified_contacts": previous.get("verified_contacts", 0) if resume else 0,
+                  "drafts_ready": previous.get("drafts_ready", 0) if resume else 0,
+                  "companies_found": previous.get("companies_found", 0) if resume else 0,
+                  "message": "Continuing your session." if resume else "Starting your session.",
+                  "provider": provider, "started_at": (previous.get("started_at") if resume else None) or datetime.now(timezone.utc).isoformat(),
+                  "segment_started_at": datetime.now(timezone.utc).isoformat(),
+                  "settings": {k: body.get(k) for k in ("provider", "goal", "cities", "depth", "limit", "preset", "max_spend")},
+                  "usage_start_calls": int(usage_before.get("calls") or 0),
+                  "usage_start_cost_usd": float(usage_before.get("cost_usd") or 0),
+                  "searches": len(queries), "estimated_search_cost_usd": round(estimate_cost(provider, queries), 4)}
         _contact_session_report = report
+        await state.set_setting("focused_session_report", json.dumps(report))
+
+        async def _checkpoint():
+            while True:
+                await asyncio.sleep(2)
+                await state.set_setting("focused_session_report", json.dumps(report))
 
         async def _go():
+            checkpoint = asyncio.create_task(_checkpoint())
             try:
-                await prepare_contacts(state, config, provider, queries, max_spend, goal, report)
+                if resume:
+                    await prepare_contacts(state, config, provider, queries, max_spend, goal, report, resume=True)
+                else:
+                    await prepare_contacts(state, config, provider, queries, max_spend, goal, report)
             except asyncio.CancelledError:
                 report.update(phase="stopped", message="Stopped. Contacts and drafts already saved remain available.")
                 raise
             except Exception as exc:
                 logger.exception("contact session failed")
                 report.update(phase="failed", message=str(exc)[:400])
+            finally:
+                checkpoint.cancel()
+                report["ended_at"] = datetime.now(timezone.utc).isoformat()
+                report["duration_seconds"] = int(previous.get("duration_seconds") or 0) + max(0, round(
+                    (datetime.fromisoformat(report["ended_at"]) -
+                     datetime.fromisoformat(report["segment_started_at"])).total_seconds()))
+                usage_after = (await state.usage_totals())["today"]
+                report["model_calls"] = int(previous.get("model_calls") or 0) + max(0, int(usage_after.get("calls") or 0) - report["usage_start_calls"])
+                report["model_cost_usd"] = round(float(previous.get("model_cost_usd") or 0) + max(0,
+                    float(usage_after.get("cost_usd") or 0) - report["usage_start_cost_usd"]), 4)
+                await state.set_setting("focused_session_report", json.dumps(report))
 
         _contact_session_task = asyncio.create_task(_go())
         return {"success": True, "goal": goal}
