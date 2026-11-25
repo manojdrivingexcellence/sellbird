@@ -573,6 +573,10 @@ MIGRATIONS: list[str] = [
       phase TEXT DEFAULT 'starting', report_json TEXT DEFAULT '{}');
     CREATE INDEX IF NOT EXISTS idx_focused_sessions_started ON focused_sessions(started_at);
     """,
+    # ── v18: exact conversation revision acknowledged by the reviewer ──
+    """
+    ALTER TABLE reply_reviews ADD COLUMN conversation_updated_at TEXT DEFAULT '';
+    """,
 ]
 
 BRAIN_PROVIDERS = ("claude", "codex")
