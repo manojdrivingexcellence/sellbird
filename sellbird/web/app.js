@@ -869,6 +869,22 @@ async function setSignals(codes, status) {
 
 let _provider = null;
 let _discoverPoll = null;
+let _contactSessionPoll = null;
+let _estimatedSearch = false;
+document.addEventListener('input', e => {
+  if (!['disc-cities', 'disc-limit', 'disc-depth', 'disc-cap'].includes(e.target.id)) return;
+  _estimatedSearch = false;
+  const button = document.getElementById('session-start');
+  button.disabled = true;
+  button.textContent = 'Estimate above first';
+});
+document.addEventListener('change', e => {
+  if (e.target.id !== 'disc-preset') return;
+  _estimatedSearch = false;
+  const button = document.getElementById('session-start');
+  button.disabled = true;
+  button.textContent = 'Estimate above first';
+});
 
 async function loadDiscoverProviders() {
   const el = document.getElementById('discover-providers');
@@ -914,13 +930,17 @@ async function loadDiscoverProviders() {
     showToast(data.running_kind === 'profile' ? 'Finished reading websites.' : 'Discovery finished.', 'success');
   }
   renderDiscoverResult(data.last_report, running);
+  loadContactSession();
 }
 
 function pickProvider(key) {
   _provider = key;
+  _estimatedSearch = false;
   document.getElementById('disc-run').disabled = true;
   document.getElementById('disc-run').textContent = 'Estimate first';
   document.getElementById('discover-estimate').innerHTML = '';
+  document.getElementById('session-start').disabled = true;
+  document.getElementById('session-start').textContent = 'Estimate above first';
   loadDiscoverProviders();
 }
 
@@ -938,6 +958,7 @@ function discoverBody() {
 }
 
 async function estimateDiscovery() {
+  _estimatedSearch = false;
   const el = document.getElementById('discover-estimate');
   el.innerHTML = '<p class="muted" style="font-size:13px">Pricing it…</p>';
   const data = await api('/api/discover/estimate', {
@@ -947,6 +968,7 @@ async function estimateDiscovery() {
   if (!data || data.error) {
     el.innerHTML = '<div class="test-result error">' +
       escHtml((data && data.error) || 'Could not estimate.') + '</div>';
+    document.getElementById('session-start').disabled = true;
     return;
   }
 
@@ -969,6 +991,62 @@ async function estimateDiscovery() {
   btn.disabled = over;
   btn.textContent = over ? 'Over cap'
     : (data.free ? 'Run — free' : 'Run — spend up to $' + data.estimated_cost.toFixed(2));
+  const session = document.getElementById('session-start');
+  _estimatedSearch = !over;
+  session.disabled = over;
+  session.textContent = over ? 'Over cap' : 'Prepare contacts now';
+}
+
+async function startContactSession() {
+  const goal = Number(document.getElementById('session-goal').value);
+  if (!Number.isInteger(goal) || goal < 1 || goal > 10) {
+    showToast('Choose 1 to 10 contacts.', 'error'); return;
+  }
+  const button = document.getElementById('session-start');
+  button.disabled = true;
+  const result = await api('/api/contact-session', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({...discoverBody(), goal}),
+  });
+  if (!result || !result.success) {
+    showToast(failMsg(result, 'Could not start the session.'), 'error');
+    button.disabled = false;
+  }
+  loadContactSession();
+}
+
+async function loadContactSession() {
+  const data = await api('/api/contact-session');
+  const el = document.getElementById('contact-session-status');
+  if (!el || !data || !data.phase) return;
+  const button = document.getElementById('session-start');
+  if (data.running && !_contactSessionPoll)
+    _contactSessionPoll = setInterval(loadContactSession, 4000);
+  else if (!data.running && _contactSessionPoll) {
+    clearInterval(_contactSessionPoll); _contactSessionPoll = null;
+  }
+  button.disabled = Boolean(data.running) || !_estimatedSearch;
+  if (data.running) button.textContent = 'Preparing contacts…';
+  else button.textContent = _estimatedSearch ? 'Prepare contacts now' : 'Estimate above first';
+  el.innerHTML = '<div class="banner ' + (data.phase === 'failed' ? 'bad' : 'wait') +
+    '" style="margin-top:16px">' + icon('alert') + '<div><b>' +
+    escHtml(data.running ? 'Working now' : data.phase === 'done' ? 'Session finished' :
+      data.phase === 'paused' ? 'Session paused' : 'Session stopped') + '</b><p>' +
+    escHtml(data.message || '') + '</p><p>' +
+    Number(data.companies_found || 0) + ' new companies · ' +
+    Number(data.verified_contacts || 0) + ' verified contacts · ' +
+    Number(data.drafts_ready || 0) + ' first-email drafts ready</p>' +
+    (data.running ? '<button class="btn btn-danger btn-sm" onclick="stopContactSession()">Stop session</button>' :
+      '<button class="btn btn-secondary btn-sm" onclick="goTab(\'contacts\')">Review contacts</button> ' +
+      '<button class="btn btn-secondary btn-sm" onclick="goTab(\'outbox\')">Review drafts</button>') +
+    '</div></div>';
+}
+
+async function stopContactSession() {
+  const result = await api('/api/contact-session/stop', {method: 'POST'});
+  showToast(result && result.success ? 'Stopping the session.' : failMsg(result, 'Could not stop.'),
+    result && result.success ? 'success' : 'error');
+  loadContactSession();
 }
 
 async function runDiscovery() {
