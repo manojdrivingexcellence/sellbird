@@ -66,6 +66,14 @@ def test_reply_queue_can_be_reviewed_without_closing_conversation(client):
     assert client.post("/api/reply-queue/reply-1/reviewed").json()["success"]
     assert {q["id"] for q in client.get("/api/reply-queue").json()} == {"reply-2"}
     assert next(c for c in client.get("/api/conversations").json() if c["id"] == "reply-1")["status"] == "open"
+    async def new_reply():
+        state = StateManager(str(client.db_path))
+        async with state._connect() as db:
+            await db.execute("UPDATE conversations SET updated_at = ? WHERE id = ?",
+                             ("2030-01-01T00:00:00.123456", "reply-1"))
+            await db.commit()
+    asyncio.run(new_reply())
+    assert {q["id"] for q in client.get("/api/reply-queue").json()} == {"reply-1", "reply-2"}
 
 
 @pytest.mark.asyncio
