@@ -1042,9 +1042,27 @@ async function loadContactSession() {
       data.phase === 'paused' ? 'Session paused' : 'Session stopped') + '</b><p>' +
     escHtml(data.message || '') + '</p><p>' +
     Number(data.companies_found || 0) + ' new companies · ' +
+    Number(data.contacts_found || 0) + ' people found · ' +
     Number(data.verified_contacts || 0) + ' verified contacts · ' +
     Number(data.drafts_ready || 0) + ' first-email drafts ready</p>' +
+    (data.contacts_found ? '<p class="muted">Excluded: ' +
+      Number(data.missing_email || 0) + ' without email · ' +
+      Number(data.unverified_email || 0) + ' unverified · ' +
+      Number(data.suppressed_email || 0) + ' suppressed</p>' : '') +
+    (data.discovery && data.discovery.discover ? '<p class="muted">Search: ' +
+      Number(data.discovery.discover.found || 0) + ' results · ' +
+      Number(data.discovery.discover.known_companies || 0) + ' already known · ' +
+      Number(data.discovery.discover.excluded || 0) + ' excluded companies · ' +
+      Number(data.discovery.discover.junk || 0) + ' unusable results</p>' : '') +
+    (data.started_at ? '<p class="muted">Started ' + relTime(data.started_at) +
+      ' · ' + Number(data.searches || 0) + ' searches' +
+      (data.search_cost_usd ? ' · search cost $' + Number(data.search_cost_usd).toFixed(4) : '') +
+      (data.model_calls == null ? '' : ' · ' + Number(data.model_calls) + ' model calls' +
+        ' · model cost $' + Number(data.model_cost_usd || 0).toFixed(4)) +
+      (data.duration_seconds == null ? '' : ' · ' + Math.ceil(Number(data.duration_seconds) / 60) + ' min') + '</p>' : '') +
     (data.running ? '<button class="btn btn-danger btn-sm" onclick="stopContactSession()">Stop session</button>' :
+      (['paused', 'stopped', 'interrupted', 'failed'].includes(data.phase) && data.settings ?
+        '<button class="btn btn-primary btn-sm" onclick="resumeContactSession()">Continue session</button> ' : '') +
       '<button class="btn btn-secondary btn-sm" onclick="goTab(\'contacts\')">Review contacts</button> ' +
       '<button class="btn btn-secondary btn-sm" onclick="goTab(\'outbox\')">Review drafts</button>') +
     '</div></div>';
@@ -1054,6 +1072,14 @@ async function stopContactSession() {
   const result = await api('/api/contact-session/stop', {method: 'POST'});
   showToast(result && result.success ? 'Stopping the session.' : failMsg(result, 'Could not stop.'),
     result && result.success ? 'success' : 'error');
+  loadContactSession();
+}
+
+async function resumeContactSession() {
+  const result = await api('/api/contact-session', {method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify({resume: true})});
+  showToast(result && result.success ? 'Continuing the saved session.' :
+    failMsg(result, 'Could not continue the session.'), result && result.success ? 'success' : 'error');
   loadContactSession();
 }
 
@@ -1831,6 +1857,8 @@ function renderDeskContext(ctx) {
     .filter(Boolean).map(escHtml).join(' &middot; ');
   const signals = Object.entries(ctx.signals || {})
     .map(([k, v]) => escHtml(k) + ': <b>' + escHtml(v) + '</b>').join('<br>');
+  const source = safeHref(ctx.contact_source_url);
+  const companySource = safeHref(ctx.company_source_url);
   return '<div class="desk-context">' +
     row('Company', escHtml(ctx.company)) +
     row('Website', site) +
@@ -1838,6 +1866,8 @@ function renderDeskContext(ctx) {
     row('Contact', who) +
     row('Found via', escHtml(Object.prototype.hasOwnProperty.call(CONTACT_SOURCES, ctx.contact_source)
       ? CONTACT_SOURCES[ctx.contact_source] : ctx.contact_source)) +
+    row('Evidence', [source ? '<a href="' + source + '" target="_blank" rel="noopener noreferrer">Contact source &#8599;</a>' : '',
+      companySource ? '<a href="' + companySource + '" target="_blank" rel="noopener noreferrer">Company source &#8599;</a>' : ''].filter(Boolean).join(' · ')) +
     row('Email', email) +
     row('Signals', signals) +
     row('Campaign', ctx.campaign ? escHtml(ctx.campaign) +
@@ -2324,6 +2354,7 @@ const CONTACT_FILTERS = [
   ['todo', 'To write', ['new', 'queued']],
   ['contacted', 'Contacted', ['contacted']],
   ['replied', 'Replied', ['replied', 'interested', 'meeting']],
+  ['bounced', 'Invalid email', null],
   ['closed', 'Closed out', null],
 ];
 
@@ -2353,6 +2384,7 @@ async function loadProspects() {
 function contactMatches(p, f) {
   const known = ['new', 'queued', 'contacted', 'replied', 'interested', 'meeting'];
   if (f === 'all') return true;
+  if (f === 'bounced') return p.email_status === 'invalid';
   if (f === 'closed') return !known.includes(p.status);
   const hit = CONTACT_FILTERS.find(x => x[0] === f);
   return !!(hit && hit[2] && hit[2].includes(p.status));
@@ -2391,7 +2423,11 @@ function renderContacts() {
         '</div></td>' +
       '<td>' + (p.score || p.score === 0 ? meterHtml(p.score) : '') + '</td>' +
       '<td>' + badge(p.status) + '</td>' +
-      '<td class="muted">' + sourceLabel(p.source) + '</td>' +
+      '<td class="muted">' + sourceLabel(p.source) +
+        (safeHref(p.source_url) ? ' · <a href="' + safeHref(p.source_url) +
+          '" target="_blank" rel="noopener noreferrer" title="Where this contact was found">Evidence &#8599;</a>' : '') +
+        (p.personalization_notes ? '<div class="cell-sub" title="' + escHtml(p.personalization_notes) + '">' +
+          escHtml(p.personalization_notes.slice(0, 90)) + '</div>' : '') + '</td>' +
       '<td class="muted" style="white-space:nowrap">' + relTime(p.created_at) + '</td>' +
       '<td><div class="cell-row">' + (p.status === 'opted_out' || p.opt_out_undone || _optOut.id === p.id
         ? '<button class="btn btn-ghost btn-sm" onclick="toggleOptOut(' + i + ')" ' +
@@ -2667,6 +2703,8 @@ const STAGE_LABELS = {
 };
 const CONVO_FILTERS = [
   ['needs', 'Needs you', c => !!c.draft || c.status === 'needs_human'],
+  ['interested', 'Interested', c => c.intent === 'interested' || c.prospect_status === 'interested' || c.prospect_status === 'meeting'],
+  ['declined', 'Declined / opt-out', c => ['not_interested', 'unsubscribe'].includes(c.intent) || c.prospect_status === 'opted_out'],
   ['open', 'Open', c => c.status !== 'closed' && c.status !== 'awaiting_reply'],
   ['awaiting', 'Awaiting reply', c => c.status === 'awaiting_reply'],
   ['closed', 'Closed', c => c.status === 'closed'],
