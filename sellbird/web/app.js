@@ -413,7 +413,7 @@ function showTab(id, btn) {
 
 function loadCurrentTab() {
   switch (currentTab) {
-    case 'today': loadLiveStatus(); loadRenameNotice(); loadToday(); loadTrend(); loadFunnel(); loadSetupStatus(); loadRuns(); loadTodayActivity(); break;
+    case 'today': loadLiveStatus(); loadRenameNotice(); loadToday(); loadCustomerWorkspace(); loadTrend(); loadFunnel(); loadSetupStatus(); loadRuns(); loadTodayActivity(); break;
     case 'signals': loadSignals(); break;
     case 'discover': loadDiscoverProviders(); break;
     case 'companies': if (!companyDrill) loadCompanies(); break;
@@ -445,9 +445,6 @@ async function loadToday() {
 
   navCount('nav-today', (data.items || []).filter(i => i.tone !== 'good').length);
   navCount('nav-outbox', (data.stats || {}).outbox_pending || 0);
-  const draftCount = document.getElementById('today-draft-count');
-  if (draftCount) draftCount.textContent = (data.stats || {}).outbox_pending
-    ? '(' + data.stats.outbox_pending + ')' : '';
   navCount('nav-signals', (data.stats || {}).signals_proposed || 0);
   navCount('nav-conversations', (data.stats || {}).needs_human || 0);
   _todayStats = data.stats || {};
@@ -499,6 +496,156 @@ async function loadDailySummary() {
     (Number(t.search_cost_usd || 0) + Number(t.model_cost_usd || 0)).toFixed(4) +
     ' search/model cost</p>' + (data.latest || []).map(s => '<p class="muted">' +
       escHtml(s.phase || '') + ' · ' + escHtml(s.message || '') + '</p>').join('') + '</div>';
+}
+
+// ── Customer daily workspace ──
+
+let _workSearch = null;
+let _workBusy = false;
+let _workProvider = null;
+let _workDraft = 0;
+document.addEventListener('input', e => {
+  if (e.target.id === 'work-city' || e.target.id === 'work-goal') workspaceResetEstimate();
+});
+
+function workspaceSearch() {
+  const city = document.getElementById('work-city').value.trim();
+  return {provider: _workProvider, cities: city ? [city] : [], preset: '',
+    depth: 30, limit: 20, max_spend: 1};
+}
+
+function workspaceResetEstimate() {
+  _workSearch = null;
+  const start = document.getElementById('work-start');
+  if (start) { start.disabled = true; start.textContent = 'Check search first'; }
+  const estimate = document.getElementById('work-estimate');
+  if (estimate) estimate.textContent = '';
+}
+
+async function estimateWorkspace() {
+  workspaceResetEstimate();
+  const el = document.getElementById('work-estimate');
+  const goal = Number(document.getElementById('work-goal').value);
+  if (!Number.isInteger(goal) || goal < 1 || goal > 10) {
+    el.textContent = 'Choose between 1 and 10 contacts.'; return;
+  }
+  const providers = await api('/api/discover/providers');
+  if (!providers || !providers.providers) { el.textContent = 'Could not read search sources.'; return; }
+  _workProvider = providers.selected || providers.default;
+  const source = providers.providers.find(p => p.key === _workProvider);
+  if (!source || !source.configured) {
+    el.innerHTML = 'Search source needs setup. <a href="#" onclick="goTab(\'discover\');return false">Open advanced search</a>.';
+    return;
+  }
+  const settings = workspaceSearch();
+  el.textContent = 'Checking search…';
+  const quote = await api('/api/discover/estimate', {method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify(settings)});
+  if (!quote || quote.error || quote.estimated_cost > settings.max_spend || quote.query_count > 12) {
+    el.textContent = quote && quote.error ? String(quote.error) :
+      'This search is too broad for a daily session. Enter one city or narrow your target in Your company.';
+    return;
+  }
+  _workSearch = {...settings, goal};
+  el.textContent = quote.query_count + ' searches · ' +
+    (quote.free ? 'no search charge' : 'estimated search cost $' + Number(quote.estimated_cost).toFixed(2)) +
+    ' · this prepares drafts, it does not send emails.';
+  const start = document.getElementById('work-start');
+  start.disabled = false;
+  start.textContent = 'Find ' + goal + ' contacts';
+}
+
+async function startWorkspace() {
+  if (!_workSearch || _workBusy) return;
+  _workBusy = true;
+  const el = document.getElementById('work-progress');
+  const result = await api('/api/contact-session', {method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify(_workSearch)});
+  _workBusy = false;
+  if (!result || !result.success) {
+    el.textContent = failMsg(result, 'Could not start the search.');
+    return;
+  }
+  workspaceResetEstimate();
+  loadCustomerWorkspace();
+}
+
+async function workspaceStop() {
+  const result = await api('/api/contact-session/stop', {method: 'POST'});
+  showToast(result && result.success ? 'Stopping the session.' : failMsg(result, 'Could not stop.'),
+    result && result.success ? 'success' : 'error');
+  loadCustomerWorkspace();
+}
+
+async function workspaceResume() {
+  const result = await api('/api/contact-session', {method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify({resume: true})});
+  showToast(result && result.success ? 'Continuing the session.' : failMsg(result, 'Could not continue.'),
+    result && result.success ? 'success' : 'error');
+  loadCustomerWorkspace();
+}
+
+async function workspaceReview(action, id) {
+  if (_workBusy) return;
+  _workBusy = true;
+  const result = await api('/api/outbox/' + encodeURIComponent(id) + '/' + action, {method: 'POST'});
+  _workBusy = false;
+  showToast(result && result.success ? (action === 'approve' ? 'Approved for scheduled sending.' : 'Draft rejected.') :
+    failMsg(result, 'Could not update the draft.'), result && result.success ? 'success' : 'error');
+  if (result && result.success) loadCustomerWorkspace();
+}
+
+async function loadCustomerWorkspace() {
+  const progress = document.getElementById('work-progress');
+  if (!progress) return;
+  const [session, contacts, outbox, mode, engine] = await Promise.all([
+    api('/api/contact-session'), api('/api/prospects'), api('/api/outbox'),
+    api('/api/sending-mode'), api('/api/sellbird/status')]);
+  if (!session || !Array.isArray(contacts) || !outbox || outbox.error) {
+    progress.textContent = 'Could not load daily work. Refresh the dashboard.'; return;
+  }
+  const running = Boolean(session.running);
+  const start = document.getElementById('work-start');
+  if (start) start.disabled = running || !_workSearch;
+  progress.innerHTML = (engine && engine.running
+    ? '<p class="muted">Background automation is running. Stop it in <a href="#" onclick="goTab(\'controls\');return false">Controls</a> to start a focused session.</p>' : '') +
+    (mode && mode.mode === 'autopilot'
+      ? '<div class="banner wait">Automatic sending is on. New focused-session drafts still wait for review, but other approved work may send automatically. <a href="#" onclick="goTab(\'settings\');return false">Change sending mode</a>.</div>' : '') +
+    (session.phase ? '<p><b>' + escHtml(session.message || session.phase) + '</b> · ' +
+      Number(session.contacts_found || 0) + ' people found · ' +
+      Number(session.verified_contacts || 0) + ' verified · ' +
+      Number(session.drafts_ready || 0) + ' drafts ready</p>' +
+      (running ? '<button class="btn btn-secondary btn-sm" onclick="workspaceStop()">Stop search</button>' :
+        ['paused', 'stopped', 'interrupted', 'failed'].includes(session.phase) && session.settings
+          ? '<button class="btn btn-secondary btn-sm" onclick="workspaceResume()">Continue search</button>' : '') +
+      (session.discovery_complete ? ' <a href="#" onclick="goTab(\'discover\');return false">See why results were excluded</a>' : '')
+      : '<p class="muted">No focused session has run yet.</p>');
+
+  const contactEl = document.getElementById('work-contacts');
+  const people = contacts.slice(0, 10);
+  contactEl.innerHTML = people.length ? '<div class="table-card"><table><thead><tr><th>Person</th><th>Company</th><th>Email</th><th>Address status</th><th>Source</th></tr></thead><tbody>' +
+    people.map(p => '<tr><td>' + escHtml([p.first_name, p.last_name].filter(Boolean).join(' ') || 'Name unknown') +
+      '</td><td>' + escHtml(p.company) + '</td><td>' + escHtml(p.email || 'No email found') +
+      '</td><td>' + escHtml(p.email_status || 'Not checked') + '</td><td>' +
+      (safeHref(p.source_url) ? '<a href="' + safeHref(p.source_url) + '" target="_blank" rel="noopener noreferrer">Check source</a>' : 'Source unavailable') +
+      '</td></tr>').join('') + '</tbody></table></div>' : '<p class="muted">No contacts found yet.</p>';
+
+  const drafts = outbox.pending || [];
+  if (_workDraft >= drafts.length) _workDraft = Math.max(0, drafts.length - 1);
+  const item = drafts[_workDraft];
+  const draftEl = document.getElementById('work-drafts');
+  draftEl.innerHTML = item ? '<div class="card"><p class="muted">' + (_workDraft + 1) + ' of ' + drafts.length +
+    ' awaiting review · ' + escHtml(item.to_email) + ' · ' + escHtml(item.context && item.context.email_status || '') + '</p>' +
+    renderDeskContext(item.context) +
+    (heldReason(item) ? '<div class="banner wait">Held for review: ' + escHtml(heldReason(item)) + '</div>' : '') +
+    '<p><b>Subject:</b> ' + escHtml(item.subject) + '</p><p style="white-space:pre-wrap">' + escHtml(item.body) + '</p>' +
+    (item.context && safeHref(item.context.website) ? '<p><a href="' + safeHref(item.context.website) + '" target="_blank" rel="noopener noreferrer">Check company website</a></p>' : '') +
+    '<div class="btn-group"><button class="btn btn-secondary btn-sm" onclick="_workDraft=Math.max(0,_workDraft-1);loadCustomerWorkspace()" ' + (_workDraft ? '' : 'disabled') + '>Previous</button>' +
+    '<button class="btn btn-secondary btn-sm" onclick="_workDraft++;loadCustomerWorkspace()" ' + (_workDraft < drafts.length - 1 ? '' : 'disabled') + '>Next</button>' +
+    '<button class="btn btn-secondary btn-sm" onclick="_desk.i=_workDraft;goTab(\'outbox\')">Edit in Outbox</button>' +
+    '<button class="btn btn-secondary btn-sm" onclick="workspaceReview(\'reject\',' + jsq(item.id) + ')">Reject</button>' +
+    '<button class="btn btn-primary btn-sm" onclick="workspaceReview(\'approve\',' + jsq(item.id) + ')">Approve</button></div></div>' :
+    '<p class="muted">No emails awaiting approval. Once a verified contact has a draft, it appears here.</p>';
 }
 
 // ── Live status: the "what's happening?" answer, kept on screen ──
@@ -3356,6 +3503,7 @@ async function loadActivity() {
 
 loadRenameNotice();
 loadToday();
+loadCustomerWorkspace();
 loadTrend();
 loadFunnel();
 loadSetupStatus();
@@ -3389,7 +3537,7 @@ setInterval(async () => {
 setInterval(() => {
   if (document.hidden || _locked) return;
   switch (currentTab) {
-    case 'today': loadToday(); loadTrend(); loadFunnel(); loadRuns(); loadTodayActivity(); break;
+    case 'today': loadToday(); loadCustomerWorkspace(); loadTrend(); loadFunnel(); loadRuns(); loadTodayActivity(); break;
     case 'companies': if (!companyDrill) loadCompanies(); break;
     case 'prospects': loadProspects(); break;
     case 'campaigns': loadCampaigns(); break;
