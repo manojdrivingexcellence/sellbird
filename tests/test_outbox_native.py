@@ -202,6 +202,21 @@ async def test_stage_campaign_renders_and_respects_approval(state):
 
 
 @pytest.mark.asyncio
+async def test_focused_session_stages_for_review_even_with_autopilot_on(state):
+    pid = await seed_prospect(state)
+    await seed_campaign(state, [pid])
+    sender = make_sender(state, FakeProvider(), require_approval=False)
+    campaign = (await state.get_campaigns_by_status("draft"))[0]
+
+    await sender._stage_campaign_native(campaign, approval_override=True)
+
+    pending = await state.get_outbox(status="pending_review")
+    assert len(pending) == 2
+    assert all(not row["approved_by"] for row in pending)
+    assert sender.provider.sent == []
+
+
+@pytest.mark.asyncio
 async def test_stage_skips_unverified(state):
     pid = await seed_prospect(state, email="guess@acme.com", estatus="guess")
     await seed_campaign(state, [pid])
