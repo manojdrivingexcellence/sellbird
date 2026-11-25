@@ -53,8 +53,8 @@ async def company(state, n, schema_missing=False, signals=None):
     return cid
 
 
-def test_the_option_is_off_by_default():
-    assert WriterConfig().require_tip is False
+def test_the_option_is_on_by_default():
+    assert WriterConfig().require_tip is True
     assert WriterConfig(require_tip=True).require_tip is True
 
 
