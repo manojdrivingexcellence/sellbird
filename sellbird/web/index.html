@@ -137,14 +137,26 @@
   <div id="today-renamed"></div>
   <div id="today-setup"></div>
 
-  <div class="card" style="margin:16px 0">
+  <div class="card" style="margin:16px 0" id="customer-workspace">
     <h3>Daily work</h3>
-    <p class="muted">Start a focused search, check the people found, then review each email before approving it.</p>
-    <div class="btn-group">
-      <button class="btn btn-primary" onclick="goTab('discover')">1. Find contacts</button>
-      <button class="btn btn-secondary" onclick="goTab('contacts')">2. Review contacts</button>
-      <button class="btn btn-secondary" onclick="goTab('outbox')">3. Review and approve emails <span id="today-draft-count"></span></button>
+    <p class="muted">Find people, check their details and review emails here. Your setup provider can adjust search sources and other advanced settings.</p>
+    <div class="subhead">1. Find contacts</div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label" for="work-city">City or area</label>
+        <input class="form-input" id="work-city" placeholder="Use saved target locations"></div>
+      <div class="form-group"><label class="form-label" for="work-goal">Verified contacts to prepare</label>
+        <input class="form-input" id="work-goal" type="number" min="1" max="10" value="5"></div>
     </div>
+    <div class="btn-group">
+      <button class="btn btn-secondary" onclick="estimateWorkspace()">Check search</button>
+      <button class="btn btn-primary" id="work-start" onclick="startWorkspace()" disabled>Check search first</button>
+    </div>
+    <div id="work-estimate" aria-live="polite"></div>
+    <div id="work-progress" aria-live="polite"></div>
+    <div class="subhead">2. Check contacts <span class="hint"><a href="#" onclick="goTab('prospects');return false">All contacts</a></span></div>
+    <div id="work-contacts"></div>
+    <div class="subhead">3. Review emails <span class="hint"><a href="#" onclick="goTab('outbox');return false">Full Outbox and bulk review</a></span></div>
+    <div id="work-drafts"></div>
   </div>
 
   <div id="today-kpis"></div>
