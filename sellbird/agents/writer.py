@@ -186,7 +186,7 @@ class Writer:
     def is_native(self) -> bool:
         return self.config.channels.email.provider in NATIVE_PROVIDERS
 
-    async def run(self):
+    async def run(self, only_ids: set[str] | None = None):
         """Create email campaigns for prospects that need outreach."""
         logger.info("Writer: Crafting email campaigns...")
 
@@ -217,6 +217,8 @@ class Writer:
 
         # Get prospects that haven't been contacted yet
         new_prospects = await self.state.get_prospects_by_status("new")
+        if only_ids is not None:
+            new_prospects = [p for p in new_prospects if p.id in only_ids]
         if not new_prospects:
             logger.info("Writer: No new prospects to write for.")
             return

@@ -642,7 +642,7 @@ class Sender:
             text = text.replace("{{ " + key + " }}", value or "")
         return text.strip()
 
-    async def _stage_campaign_native(self, campaign):
+    async def _stage_campaign_native(self, campaign, approval_override: bool = False):
         """Render + schedule a draft campaign's emails into the outbox."""
         if not self._validate_sequence(campaign):
             await self.state.update_campaign(campaign.id, status="failed")
@@ -652,7 +652,7 @@ class Sender:
         require_approval = getattr(
             self.config.channels.email, "require_approval", True
         )
-        initial_status = "pending_review" if require_approval else "approved"
+        initial_status = "pending_review" if require_approval or approval_override else "approved"
         allow_risky = getattr(self.config.channels.email, "send_to_risky", False)
         sendable_email = (
             SENDABLE_EMAIL_STATUSES_WITH_RISKY if allow_risky
@@ -707,7 +707,7 @@ class Sender:
                     send_at=send_at.isoformat(),
                     status=initial_status,
                     provider=self.provider.name,
-                    approved_by="" if require_approval else "autopilot",
+                    approved_by="" if require_approval or approval_override else "autopilot",
                 )
                 if item_id:
                     staged += 1
@@ -731,7 +731,7 @@ class Sender:
                 f"{COLLEAGUE_REPLIED} at their company."
             )
         if staged:
-            mode = "awaiting your approval" if require_approval else "approved"
+            mode = "awaiting your approval" if require_approval or approval_override else "approved"
             logger.info(
                 f"Sender: staged {staged} email(s) for '{campaign.name}' "
                 f"({mode}). Review in the dashboard Outbox tab."
