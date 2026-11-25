@@ -508,6 +508,22 @@ class Sender:
         prospects = self._reviewed_leads(prospects)
         if not prospects:
             return
+        try:
+            from sellbird.agency_registry import configured_registry
+            registry = configured_registry()
+            if registry:
+                allowed = []
+                for p in prospects:
+                    if await registry.reserve(p.email):
+                        allowed.append(p)
+                    else:
+                        logger.warning("Sender: holding a lead already reserved in another workspace")
+                prospects = allowed
+                if not prospects:
+                    return
+        except Exception as e:
+            logger.error("Sender: agency registry unavailable; not adding leads: %s", e)
+            return
         leads = [
             {
                 "email": p.email.strip().lower(),
@@ -1174,6 +1190,23 @@ class Sender:
                                                     error=f"held: {NO_HEADERS_HOLD}")
                 continue
             extra = {"headers": headers} if headers else {}
+            # Opt-in agency registry: reserve before the provider call. A
+            # timeout can mean the provider sent it, so never release the
+            # reservation on an uncertain result. Follow-ups from this same
+            # workspace are allowed; a different customer is held back.
+            try:
+                from sellbird.agency_registry import configured_registry
+                registry = configured_registry()
+                if registry and not await registry.reserve(item["to_email"]):
+                    await self.state.update_outbox_item(
+                        item["id"], status="cancelled",
+                        error="Address already contacted by another participating workspace")
+                    continue
+            except Exception as e:
+                logger.error("Sender: agency registry unavailable; holding email: %s", e)
+                await self.state.update_outbox_item(
+                    item["id"], status="approved", error="held: agency registry unavailable")
+                continue
             try:
                 result = await provider.send_email(
                     item["to_email"], item["subject"], body,
