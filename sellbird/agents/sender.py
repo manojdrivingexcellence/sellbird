@@ -701,6 +701,13 @@ class Sender:
                 continue
             seen_emails.add(email)
 
+            # In evidence-required mode, a failed personal draft must not be
+            # replaced by the generic campaign template (including follow-ups).
+            if getattr(getattr(self.config, "writer", None), "require_tip", False):
+                if not await self.state.has_first_outbox_email(campaign.id, prospect.id):
+                    logger.info("Sender: holding %s until a personal first draft exists", email)
+                    continue
+
             # With a send window, each email is planned for the recipient's
             # office hours; follow-ups keep their delay, then move into it.
             zone = await self._zone_or_default(prospect) if window is not None else ""
