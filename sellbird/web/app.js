@@ -483,6 +483,7 @@ async function loadDailySummary() {
   const data = await api('/api/daily-summary?tz=' + -new Date().getTimezoneOffset());
   if (!data || !data.totals) return;
   const t = data.totals;
+  if (!Number(data.sessions || 0)) { el.innerHTML = ''; return; }
   el.innerHTML = '<div class="card" style="margin:16px 0"><b>Focused sessions today · ' +
     Number(data.sessions || 0) + '</b><p>' + Number(t.companies_found || 0) +
     ' companies → ' + Number(t.contacts_found || 0) + ' people → ' +
@@ -743,11 +744,13 @@ async function loadSetupStatus() {
 
   el.innerHTML =
     '<div class="card setup-card">' +
-      '<div class="setup-head"><div><h3>Finish setting up Sellbird</h3>' +
-        '<p class="muted">Sellbird starts finding prospects and sending once these are done.</p></div>' +
+      '<div class="setup-head"><div><h3>Next setup step</h3>' +
+        '<p class="muted">Complete this before starting your daily contact search.</p></div>' +
         '<span class="setup-pct">' + done + ' of ' + required.length + ' done</span></div>' +
       '<div class="bar thick" style="margin-bottom:8px"><span style="width:' + pct + '%;background:var(--accent)"></span></div>' +
-      required.map(c => renderCheck(c, false)).join('') +
+      (next ? renderCheck(next, false) : '') +
+      '<details style="margin-top:10px"><summary class="muted" style="font-size:12px">View all setup steps</summary>' +
+      required.filter(c => c !== next).map(c => renderCheck(c, false)).join('') + '</details>' +
       (optional.length
         ? '<details style="margin-top:10px"><summary class="muted" ' +
           'style="font-size:12px">' + optional.length + ' optional</summary>' +
