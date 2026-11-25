@@ -229,7 +229,7 @@
       </div>
       <div class="form-group">
         <label class="form-label" for="disc-limit">Results per query</label>
-        <input class="form-input" id="disc-limit" type="number" value="100" min="1" max="1000">
+        <input class="form-input" id="disc-limit" type="number" value="20" min="1" max="1000">
       </div>
       <div class="form-group">
         <label class="form-label" for="disc-depth">Search depth</label>
@@ -250,6 +250,18 @@
     </div>
   </div>
   <div id="discover-result"></div>
+  <div class="subhead">Focused contact session <span class="hint">Optional; Autopilot remains available in Settings</span></div>
+  <div class="card">
+    <p class="desc">Use the source and search settings above. Stop the background loop in Controls first.
+      Sellbird will search, check addresses, and put up to your goal of first-email drafts in Outbox.
+      It will not send from this session. The search may find extra companies or people.</p>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label" for="session-goal">Verified contacts to prepare</label>
+        <input class="form-input" id="session-goal" type="number" min="1" max="10" value="5"></div>
+    </div>
+    <button class="btn btn-primary" id="session-start" onclick="startContactSession()" disabled>Estimate above first</button>
+    <div id="contact-session-status" aria-live="polite"></div>
+  </div>
 </div>
 
 <!-- Companies -->
