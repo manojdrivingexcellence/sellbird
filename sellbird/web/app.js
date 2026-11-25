@@ -606,11 +606,13 @@ async function loadCustomerWorkspace() {
   }
   const running = Boolean(session.running);
   const start = document.getElementById('work-start');
-  if (start) start.disabled = running || !_workSearch;
+  if (start) start.disabled = running || Boolean(engine && engine.running) || !_workSearch;
   progress.innerHTML = (engine && engine.running
-    ? '<p class="muted">Background automation is running. Stop it in <a href="#" onclick="goTab(\'controls\');return false">Controls</a> to start a focused session.</p>' : '') +
+    ? '<p class="muted">Background automation is running. Stop it before starting a focused session. ' +
+      '<button class="btn btn-secondary btn-sm" onclick="stopSellbird().then(loadCustomerWorkspace)">Stop background run</button></p>' : '') +
     (mode && mode.mode === 'autopilot'
-      ? '<div class="banner wait">Automatic sending is on. New focused-session drafts still wait for review, but other approved work may send automatically. <a href="#" onclick="goTab(\'settings\');return false">Change sending mode</a>.</div>' : '') +
+      ? '<div class="banner wait">Automatic sending is on. Focused-session drafts still wait for review, but other work may send automatically. ' +
+        '<button class="btn btn-secondary btn-sm" onclick="setSendingMode(\'approval\').then(loadCustomerWorkspace)">Switch to review mode</button></div>' : '') +
     (session.phase ? '<p><b>' + escHtml(session.message || session.phase) + '</b> · ' +
       Number(session.contacts_found || 0) + ' people found · ' +
       Number(session.verified_contacts || 0) + ' verified · ' +
