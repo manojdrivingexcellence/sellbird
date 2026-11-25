@@ -618,7 +618,7 @@ async function loadCustomerWorkspace() {
       (running ? '<button class="btn btn-secondary btn-sm" onclick="workspaceStop()">Stop search</button>' :
         ['paused', 'stopped', 'interrupted', 'failed'].includes(session.phase) && session.settings
           ? '<button class="btn btn-secondary btn-sm" onclick="workspaceResume()">Continue search</button>' : '') +
-      (session.discovery_complete ? ' <a href="#" onclick="goTab(\'discover\');return false">See why results were excluded</a>' : '')
+      (session.discovery_complete ? ' <button class="btn btn-ghost btn-sm" onclick="showLeadDecisions(\'work-decisions\')">Why were results excluded?</button>' : '')
       : '<p class="muted">No focused session has run yet.</p>');
 
   const contactEl = document.getElementById('work-contacts');
@@ -1260,9 +1260,9 @@ async function resumeContactSession() {
 }
 
 let _showLeadDecisions = false;
-async function showLeadDecisions() {
+async function showLeadDecisions(targetId = 'lead-decisions') {
   _showLeadDecisions = true;
-  const el = document.getElementById('lead-decisions');
+  const el = document.getElementById(targetId);
   if (!el) return;
   const data = await api('/api/contact-session/decisions');
   if (!data) { el.textContent = 'Could not load lead decisions.'; return; }
