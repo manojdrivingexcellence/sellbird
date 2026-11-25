@@ -374,7 +374,8 @@ class Writer:
             company = await self.state.get_company(prospect.company_id) if prospect.company_id else None
         except Exception:
             company = None
-        return bool(company and company.signals)
+        return bool(company and any(str(s.get("detail") or "").strip()
+                                    for s in company.signals if isinstance(s, dict)))
 
     async def _count_failed_attempt(self, batch_name: str, prospects: list):
         """Count one unusable sequence against each prospect in the batch.
@@ -605,6 +606,14 @@ funding rounds, mutual contacts, metrics, or anything else:
 {fence(chr(10).join(facts), "prospect research")}
 
 {UNTRUSTED_RULE}
+
+An existing website is not evidence that they need a new website. A company
+description or detected website is not evidence of missed enquiries, broken
+follow-up, or lost sales. Name only a specific observed issue. If the offer
+mentions a website audit, frame it as an improvement to their existing site
+and enquiry journey only when the facts support that improvement. Never use
+"follow up" in the subject of a first contact. If the facts do not support a
+specific relevant issue, return an empty JSON object instead of guessing.
 
 Requirements:
 {shape}
