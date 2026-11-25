@@ -13,7 +13,7 @@ import sys
 import tempfile
 import uuid
 from collections.abc import Sequence
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import aiosqlite
@@ -34,7 +34,7 @@ from sellbird.paths import PACKAGE_ROOT, PROJECT_ROOT, is_checkout  # noqa: E402
 from sellbird import storage  # noqa: E402
 from sellbird.pidfile import LOCK_FILE, loop_lock_held, pid_alive  # noqa: E402
 from sellbird.textio import read_user_text  # noqa: E402
-from sellbird.workspace_home import NotOnHosted, use_home  # noqa: E402
+from sellbird.workspace_home import NotOnHosted, current_home, use_home  # noqa: E402
 DB_PATH = PROJECT_ROOT / "data" / "sellbird.db"
 ENV_FILE = PROJECT_ROOT / ".env"
 CONFIG_FILE = PROJECT_ROOT / "sellbird.yaml"
@@ -110,10 +110,11 @@ async def query_db(sql: str, params: tuple = ()) -> list[dict]:
     Never raises: a missing DB file, missing table, or malformed schema
     returns [] so no dashboard route can 500 on an empty install.
     """
-    if not DB_PATH.exists():
+    db_path = current_home().db_path
+    if not db_path.exists():
         return []
     try:
-        async with storage.connect(str(DB_PATH)) as db:
+        async with storage.connect(str(db_path)) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(sql, params) as cursor:
                 rows = await cursor.fetchall()
@@ -1198,9 +1199,34 @@ async def get_prospects():
     return rows
 
 
+@app.get("/api/prospects/{prospect_id}/evidence")
+async def prospect_evidence(prospect_id: str):
+    """Reviewable sources and verification facts for one contact."""
+    rows = await query_db(
+        "SELECT p.id, p.first_name, p.last_name, p.title, p.email, p.email_status, "
+        "p.source, p.source_url, p.personalization_notes, p.score, "
+        "c.name AS company, c.website, c.source_url AS company_source_url, "
+        "c.description, c.domain FROM prospects p LEFT JOIN companies c ON c.id = p.company_id "
+        "WHERE p.id = ?", (prospect_id,))
+    if not rows:
+        return JSONResponse({"error": "Contact not found."}, status_code=404)
+    person = rows[0]
+    pattern = await query_db(
+        "SELECT pattern, source, confidence, mx_type, is_catch_all, updated_at "
+        "FROM email_patterns WHERE domain = ?", ((person.get("email") or "").rsplit("@", 1)[-1].lower(),))
+    observations = await query_db(
+        "SELECT o.signal_code, COALESCE(NULLIF(sc.label, ''), o.signal_code) AS label, "
+        "o.value_text, o.value_num, o.evidence_url, o.observed_at "
+        "FROM observations o LEFT JOIN signal_codes sc ON sc.code = o.signal_code "
+        "JOIN prospects p ON p.company_id = o.company_id WHERE p.id = ? "
+        "AND o.evidence_url != '' ORDER BY o.observed_at DESC LIMIT 20", (prospect_id,))
+    return {"contact": person, "email_pattern": pattern[0] if pattern else None,
+            "signals": observations}
+
+
 def _state():
     from sellbird.state import StateManager
-    return StateManager(db_path=str(DB_PATH))
+    return StateManager(db_path=str(current_home().db_path))
 
 
 # What a reviewer needs next to a draft to check its claims against the facts.
@@ -1232,10 +1258,11 @@ async def _with_context(items: list[dict]) -> list[dict]:
 
     company_ids = sorted({p["company_id"] for p in people.values() if p.get("company_id")})
     signals: dict[str, dict[str, str]] = {}
+    signal_sources: dict[str, list[dict]] = {}
     if company_ids:
         rows = await query_db(
             "SELECT o.company_id, o.signal_code, o.value_num, o.value_text, "
-            "o.observed_at, o.run_id, "
+            "o.observed_at, o.run_id, o.evidence_url, "
             "COALESCE(NULLIF(sc.label, ''), o.signal_code) AS label FROM observations o "
             "LEFT JOIN signal_codes sc ON sc.code = o.signal_code "
             f"WHERE o.company_id IN ({_in(company_ids)}) "
@@ -1248,6 +1275,11 @@ async def _with_context(items: list[dict]) -> list[dict]:
         # value from the latest sighting shows, not just one of them.
         latest: dict[tuple, tuple] = {}
         for r in rows:
+            if r.get("evidence_url"):
+                source = {"label": r["label"], "url": r["evidence_url"]}
+                links = signal_sources.setdefault(r["company_id"], [])
+                if source not in links:
+                    links.append(source)
             if r["value_text"]:
                 value = r["value_text"]
             elif r["value_num"] is None:
@@ -1282,6 +1314,7 @@ async def _with_context(items: list[dict]) -> list[dict]:
             "score": p.get("score"),
             "notes": p.get("personalization_notes", ""),
             "signals": signals.get(p.get("company_id"), {}),
+            "signal_sources": signal_sources.get(p.get("company_id"), [])[:10],
         }
     return items
 
@@ -1890,6 +1923,41 @@ async def get_conversations(awaiting: bool = False):
     return rows
 
 
+@app.get("/api/reply-queue")
+async def reply_queue():
+    """Replies needing a human decision, without changing conversation status."""
+    return await query_db(
+        "SELECT c.id, c.prospect_id, c.intent, c.status, c.updated_at, "
+        "p.first_name, p.last_name, p.company, p.email, p.status AS prospect_status "
+        "FROM conversations c JOIN prospects p ON p.id = c.prospect_id "
+        "LEFT JOIN reply_reviews r ON r.conversation_id = c.id "
+        "WHERE c.status = 'needs_human' OR ("
+        "(c.intent IN ('interested', 'not_interested', 'unsubscribe') "
+        "OR p.status IN ('interested', 'meeting', 'opted_out')) "
+        "AND (r.reviewed_at IS NULL OR datetime(c.updated_at) > datetime(r.reviewed_at))) "
+        "ORDER BY CASE WHEN c.status = 'needs_human' THEN 0 "
+        "WHEN c.intent = 'interested' THEN 1 ELSE 2 END, c.updated_at DESC LIMIT 100")
+
+
+@app.post("/api/reply-queue/{convo_id}/reviewed")
+async def mark_reply_reviewed(convo_id: str):
+    rows = await query_db("SELECT id, status FROM conversations WHERE id = ?", (convo_id,))
+    if not rows:
+        return JSONResponse({"success": False, "message": "No such conversation."}, status_code=404)
+    if rows[0]["status"] == "needs_human":
+        return JSONResponse({"success": False, "message": "Handle this conversation before clearing it."}, status_code=409)
+    state = _state()
+    await state.init_db()
+    async with state._connect() as db:
+        await db.execute(
+            "INSERT INTO reply_reviews (conversation_id, reviewed_at) VALUES (?, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(conversation_id) DO UPDATE SET reviewed_at = CURRENT_TIMESTAMP",
+            (convo_id,))
+        await db.commit()
+    await state.log_action("reply_reviewed", "dashboard", {"conversation_id": convo_id})
+    return {"success": True}
+
+
 async def _awaiting_reply() -> list[dict]:
     """Prospects Sellbird emailed who haven't replied yet, shaped like a
     conversation so the tab can show every sent email, not only the ones
@@ -2089,11 +2157,72 @@ async def contact_session_status():
         if report.get("phase") not in ("done", "paused", "failed", "stopped", "interrupted", None):
             report.update(phase="interrupted", message="Dashboard restarted during this session. Saved contacts and drafts remain available; choose Continue session to pick up the saved work.")
             await state.set_setting("focused_session_report", json.dumps(report))
+            if report.get("session_id"):
+                await state.save_focused_session(report)
     public_report = {k: v for k, v in (report or {}).items() if k not in (
         "baseline_people", "baseline_campaigns", "selected_ids", "usage_start_calls",
         "usage_start_cost_usd", "segment_started_at")}
     return {**public_report,
             "running": bool(_contact_session_task and not _contact_session_task.done())}
+
+
+@app.get("/api/contact-session/decisions")
+async def contact_session_decisions():
+    """Individual search exclusions and unusable new contacts from this run."""
+    from sellbird.workspace_home import require_self_hosted
+    require_self_hosted("local_discovery")
+    state = _state()
+    await state.init_db()
+    try:
+        report = _contact_session_report or json.loads(
+            await state.get_setting("focused_session_report") or "{}")
+    except (ValueError, TypeError):
+        report = {}
+    run_id = ((report.get("discovery") or {}).get("discover") or {}).get("run_id", "")
+    rejected = await state.lead_decisions(run_id) if run_id else []
+    baseline = set(report.get("baseline_people") or [])
+    if not baseline and not report.get("discovery_complete"):
+        return {"companies": rejected, "contacts": []}
+    rows = await query_db("SELECT id, first_name, last_name, company, email, email_status, "
+                          "source_url FROM prospects ORDER BY created_at DESC LIMIT 2000")
+    contacts = []
+    for p in rows:
+        if p["id"] in baseline:
+            continue
+        reason = ("missing_email" if not p["email"] else
+                  "unverified_email" if p["email_status"] != "verified" else
+                  "suppressed_email" if await state.is_suppressed(p["email"]) else "")
+        if reason:
+            contacts.append({**p, "reason": reason})
+    return {"companies": rejected, "contacts": contacts[:500]}
+
+
+@app.get("/api/daily-summary")
+async def daily_summary(tz: int = 0):
+    """Operator-started sessions on the viewer's local day, including pauses."""
+    offset = timezone(timedelta(minutes=max(-840, min(840, tz))))
+    today = datetime.now(offset).date()
+    state = _state()
+    await state.init_db()
+    sessions = []
+    for report in await state.recent_focused_sessions():
+        try:
+            started = datetime.fromisoformat(report["started_at"])
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            if started.astimezone(offset).date() == today:
+                sessions.append(report)
+        except (KeyError, TypeError, ValueError):
+            continue
+    fields = ("companies_found", "contacts_found", "verified_contacts", "drafts_ready",
+              "missing_email", "unverified_email", "suppressed_email", "model_calls",
+              "search_cost_usd", "model_cost_usd", "duration_seconds")
+    totals = {field: round(sum(float(s.get(field) or 0) for s in sessions), 4)
+              for field in fields}
+    return {"date": today.isoformat(), "sessions": len(sessions), "totals": totals,
+            "latest": [{"phase": s.get("phase"), "message": s.get("message"),
+                        "started_at": s.get("started_at"), "goal": s.get("goal")}
+                       for s in sessions[:5]]}
 
 
 @app.post("/api/contact-session/stop")
@@ -2163,6 +2292,7 @@ async def start_contact_session(request: Request):
         await state.set_setting("discovery_paused", "")
         usage_before = (await state.usage_totals())["today"]
         report = {**(previous if resume else {}), "phase": "starting", "goal": goal,
+                  "session_id": previous.get("session_id") if resume and previous.get("session_id") else uuid.uuid4().hex,
                   "verified_contacts": previous.get("verified_contacts", 0) if resume else 0,
                   "drafts_ready": previous.get("drafts_ready", 0) if resume else 0,
                   "companies_found": previous.get("companies_found", 0) if resume else 0,
@@ -2175,11 +2305,13 @@ async def start_contact_session(request: Request):
                   "searches": len(queries), "estimated_search_cost_usd": round(estimate_cost(provider, queries), 4)}
         _contact_session_report = report
         await state.set_setting("focused_session_report", json.dumps(report))
+        await state.save_focused_session(report)
 
         async def _checkpoint():
             while True:
                 await asyncio.sleep(2)
                 await state.set_setting("focused_session_report", json.dumps(report))
+                await state.save_focused_session(report)
 
         async def _go():
             checkpoint = asyncio.create_task(_checkpoint())
@@ -2205,6 +2337,7 @@ async def start_contact_session(request: Request):
                 report["model_cost_usd"] = round(float(previous.get("model_cost_usd") or 0) + max(0,
                     float(usage_after.get("cost_usd") or 0) - report["usage_start_cost_usd"]), 4)
                 await state.set_setting("focused_session_report", json.dumps(report))
+                await state.save_focused_session(report)
 
         _contact_session_task = asyncio.create_task(_go())
         return {"success": True, "goal": goal}
