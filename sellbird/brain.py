@@ -672,11 +672,13 @@ class Brain:
         user's own interactive work. Fallback when those are unavailable:
         Sellbird's own call counter for this provider against max_daily_calls.
         """
+        self.budget_reason = ""
         await self._expire_usage_pause()
         if time.monotonic() < self._usage_limited_until:
             # Codex said the plan is out of usage: an unreadable quota must
             # not be mistaken for room to spend.
             logger.info(f"{self.paused_reason}; waiting for it to reset.")
+            self.budget_reason = self.paused_reason or "The plan reported a usage limit."
             return False
         if max_percent is not None:
             try:
@@ -690,6 +692,10 @@ class Brain:
                 )
                 within = worst < max_percent
                 if not within:
+                    self.budget_reason = (
+                        f"{self.provider_label} usage is {worst:.0f}%, at or above "
+                        f"the configured {max_percent:.0f}% ceiling."
+                    )
                     resets = ", ".join(
                         f"{name} resets {w['resets_at']}"
                         for name, w in windows.items()
@@ -702,6 +708,11 @@ class Brain:
                 return within
 
         calls = await self.check_usage()
+        if calls >= max_daily_calls:
+            self.budget_reason = (
+                f"Subscription quota is unavailable; Sellbird has used {calls} of "
+                f"its {max_daily_calls} daily model calls."
+            )
         return calls < max_daily_calls
 
     async def _think_transport(self, prompt: str, *, expect_json: bool, timeout: float,

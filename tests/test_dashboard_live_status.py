@@ -89,6 +89,22 @@ def test_live_status_on_an_empty_database(client):
     assert data["next_tab"] == "discover"
 
 
+def test_usage_pause_explains_why_the_loop_is_waiting(client, env, monkeypatch):
+    from sellbird.main import LOOP_STATUS_KEY
+    monkeypatch.setattr(dash, "_check_sellbird_pid", lambda: 123)
+    record = {"phase": "usage", "detail": "Codex usage is 35%, at or above the configured 30% ceiling.",
+              "recorded_at": datetime.now(timezone.utc).isoformat(),
+              "next_check_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()}
+    _sql(env, "INSERT INTO settings (key, value) VALUES (?, ?)", (LOOP_STATUS_KEY, json.dumps(record)))
+    data = client.get("/api/live-status").json()
+    assert data["loop_status"]["detail"] == record["detail"]
+    assert data["next"] == record["detail"]
+    assert data["next_tab"] == "usage"
+
+    monkeypatch.setattr(dash, "_check_sellbird_pid", lambda: None)
+    assert client.get("/api/live-status").json()["loop_status"] is None
+
+
 def test_live_status_without_a_database_file(client, env):
     env["db"].unlink()
     assert client.get("/api/live-status").status_code == 200

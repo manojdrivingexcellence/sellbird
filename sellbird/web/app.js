@@ -516,10 +516,18 @@ async function loadLiveStatus() {
     ? '<div class="banner bad" style="margin:8px 0 0">' + icon('alert') + '<p style="color:inherit">' +
       (d.stopped || []).map(r => escHtml(jobName(r))).join(', ') + ' stopped before finishing.</p></div>'
     : '';
+  const loop = d.loop_status;
+  const loopHtml = loop && loop.detail
+    ? '<div class="banner ' + (loop.phase === 'interval' ? 'good' : 'wait') +
+      '" style="margin:8px 0 0">' + icon('alert') + '<p style="color:inherit">' +
+      escHtml(loop.detail) + (loop.next_check_at ? ' Next check: ' +
+      escHtml(new Date(loop.next_check_at).toLocaleTimeString()) + '.' : '') + '</p></div>'
+    : '';
   el.innerHTML =
     '<div class="live-head">' + runningHtml +
       '<span class="setup-pct">Cost so far $' + Number(d.cost_usd || 0).toFixed(2) + '</span></div>' +
     stoppedHtml +
+    loopHtml +
     '<div class="steps">' + rows + '</div>' +
     (d.next ? '<div class="live-next">' + icon('arrow') + '<span><b>Next</b> · ' + escHtml(d.next) + '</span>' +
       (d.next_tab ? '<button class="btn btn-secondary btn-sm" onclick="goTab(' + jsq(d.next_tab) + ')">Go</button>' : '') +
