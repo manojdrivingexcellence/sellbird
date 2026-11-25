@@ -445,6 +445,9 @@ async function loadToday() {
 
   navCount('nav-today', (data.items || []).filter(i => i.tone !== 'good').length);
   navCount('nav-outbox', (data.stats || {}).outbox_pending || 0);
+  const draftCount = document.getElementById('today-draft-count');
+  if (draftCount) draftCount.textContent = (data.stats || {}).outbox_pending
+    ? '(' + data.stats.outbox_pending + ')' : '';
   navCount('nav-signals', (data.stats || {}).signals_proposed || 0);
   navCount('nav-conversations', (data.stats || {}).needs_human || 0);
   _todayStats = data.stats || {};
@@ -808,7 +811,7 @@ async function loadSignals() {
 
   const s = data.summary || {};
   navCount('nav-signals', s.proposed || 0);
-  const parts = [['Confirmed', s.confirmed || 0, 'c-good'], ['Waiting on you', s.proposed || 0, 'c-wait'],
+  const parts = [['In use', s.confirmed || 0, 'c-good'], ['Available to choose', s.proposed || 0, 'c-wait'],
                  ['Turned off', s.rejected || 0, 'c-idle']];
   const all = parts.reduce((x, p) => x + p[1], 0) || 1;
   sumEl.innerHTML = '<div class="card sig-summary"><div class="funnel-bar">' +
