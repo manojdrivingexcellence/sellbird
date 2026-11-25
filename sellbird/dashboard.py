@@ -1980,6 +1980,8 @@ async def get_activity():
 _discovery_task: asyncio.Task | None = None
 _discovery_report: dict | None = None
 _discovery_kind = "discover"   # or "profile": reading sites has no stop switch
+_contact_session_task: asyncio.Task | None = None
+_contact_session_report: dict | None = None
 
 
 def _discovery_queries(body: dict, config):
@@ -2048,6 +2050,87 @@ async def estimate_discovery(request: Request):
         }
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/contact-session")
+async def contact_session_status():
+    """Progress for the operator-started contact and draft session."""
+    return {**(_contact_session_report or {}),
+            "running": bool(_contact_session_task and not _contact_session_task.done())}
+
+
+@app.post("/api/contact-session/stop")
+async def stop_contact_session():
+    """Stop the focused pass; already saved contacts and drafts remain visible."""
+    if not _contact_session_task or _contact_session_task.done():
+        return {"success": False, "message": "No focused session is running."}
+    state = _state()
+    await state.init_db()
+    await state.set_setting("discovery_paused", "stopped from dashboard")
+    _contact_session_task.cancel()
+    return {"success": True}
+
+
+@app.post("/api/contact-session")
+async def start_contact_session(request: Request):
+    """Run discovery, contact verification and drafting now, without sending."""
+    global _contact_session_task, _contact_session_report
+    if (_contact_session_task and not _contact_session_task.done()
+            or _discovery_task and not _discovery_task.done()):
+        return JSONResponse({"success": False, "message": "Another discovery or contact session is running."},
+                            status_code=409)
+    if _check_sellbird_pid():
+        return JSONResponse({"success": False, "message":
+                             "Stop the background loop in Controls before starting a focused session. "
+                             "You can start it again afterward."}, status_code=409)
+    try:
+        from sellbird.collectors.discover import PROVIDERS, estimate_cost
+        from sellbird.config import load_config
+        from sellbird.contact_session import prepare_contacts
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("Expected session settings.")
+        goal = body.get("goal", 5)
+        if type(goal) is not int or not 1 <= goal <= 10:
+            raise ValueError("Choose a goal from 1 to 10 contacts.")
+        provider = body.get("provider") or ""
+        if provider not in PROVIDERS:
+            raise ValueError("Choose a discovery source first.")
+        config = load_config()
+        if config.channels.email.provider not in ("gmail", "microsoft", "smtp"):
+            raise ValueError("Focused Outbox review needs Gmail, Microsoft 365 or SMTP.")
+        queries = _discovery_queries(body, config)
+        if len(queries) > 12 or any(q.limit > 30 or q.limit < 1 for q in queries):
+            raise ValueError("For a focused session, use at most 12 searches and 1–30 results per query.")
+        max_spend = float(body.get("max_spend") or 1.0)
+        if not 0 < max_spend <= 50:  # rejects NaN as well
+            raise ValueError("Choose a spend cap between $0 and $50.")
+        if estimate_cost(provider, queries) > max_spend:
+            raise ValueError("Search estimate is over your spend cap. Narrow the search first.")
+        state = _state()
+        await state.init_db()
+        await state.set_setting("discovery_paused", "")
+        report = {"phase": "starting", "goal": goal, "verified_contacts": 0,
+                  "drafts_ready": 0, "companies_found": 0, "message": "Starting your session."}
+        _contact_session_report = report
+
+        async def _go():
+            try:
+                await prepare_contacts(state, config, provider, queries, max_spend, goal, report)
+            except asyncio.CancelledError:
+                report.update(phase="stopped", message="Stopped. Contacts and drafts already saved remain available.")
+                raise
+            except Exception as exc:
+                logger.exception("contact session failed")
+                report.update(phase="failed", message=str(exc)[:400])
+
+        _contact_session_task = asyncio.create_task(_go())
+        return {"success": True, "goal": goal}
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"success": False, "message": str(exc)}, status_code=400)
+    except Exception as exc:
+        logger.exception("contact session start failed")
+        return JSONResponse({"success": False, "message": str(exc)}, status_code=500)
 
 
 @app.post("/api/discover/run")
