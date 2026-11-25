@@ -2811,12 +2811,10 @@ async def get_today():
         if proposed:
             items.append({
                 "key": "signals", "tone": "warn",
-                "title": (f"{len(proposed)} signal waiting for your confirmation"
-                          if len(proposed) == 1
-                          else f"{len(proposed)} signals waiting for your confirmation"),
-                "detail": ("Sellbird won't collect anything you haven't approved. "
-                           "Confirm which signals define a good prospect for you."),
-                "action": "Review signals", "tab": "signals",
+                "title": f"{len(proposed)} optional search rules to review",
+                "detail": ("These are possible clues about a business, not contacts or emails. "
+                           "Turn on only the rules relevant to your ideal customer."),
+                "action": "Choose rules", "tab": "signals",
             })
         elif not confirmed:
             items.append({
