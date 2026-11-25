@@ -1934,14 +1934,14 @@ async def reply_queue():
         "WHERE c.status = 'needs_human' OR ("
         "(c.intent IN ('interested', 'not_interested', 'unsubscribe') "
         "OR p.status IN ('interested', 'meeting', 'opted_out')) "
-        "AND (r.reviewed_at IS NULL OR datetime(c.updated_at) > datetime(r.reviewed_at))) "
+        "AND (r.reviewed_at IS NULL OR c.updated_at != r.conversation_updated_at)) "
         "ORDER BY CASE WHEN c.status = 'needs_human' THEN 0 "
         "WHEN c.intent = 'interested' THEN 1 ELSE 2 END, c.updated_at DESC LIMIT 100")
 
 
 @app.post("/api/reply-queue/{convo_id}/reviewed")
 async def mark_reply_reviewed(convo_id: str):
-    rows = await query_db("SELECT id, status FROM conversations WHERE id = ?", (convo_id,))
+    rows = await query_db("SELECT id, status, updated_at FROM conversations WHERE id = ?", (convo_id,))
     if not rows:
         return JSONResponse({"success": False, "message": "No such conversation."}, status_code=404)
     if rows[0]["status"] == "needs_human":
@@ -1950,9 +1950,10 @@ async def mark_reply_reviewed(convo_id: str):
     await state.init_db()
     async with state._connect() as db:
         await db.execute(
-            "INSERT INTO reply_reviews (conversation_id, reviewed_at) VALUES (?, CURRENT_TIMESTAMP) "
-            "ON CONFLICT(conversation_id) DO UPDATE SET reviewed_at = CURRENT_TIMESTAMP",
-            (convo_id,))
+            "INSERT INTO reply_reviews (conversation_id, reviewed_at, conversation_updated_at) "
+            "VALUES (?, CURRENT_TIMESTAMP, ?) ON CONFLICT(conversation_id) DO UPDATE SET "
+            "reviewed_at = CURRENT_TIMESTAMP, conversation_updated_at = excluded.conversation_updated_at",
+            (convo_id, rows[0]["updated_at"]))
         await db.commit()
     await state.log_action("reply_reviewed", "dashboard", {"conversation_id": convo_id})
     return {"success": True}
