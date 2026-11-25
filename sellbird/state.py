@@ -1380,6 +1380,21 @@ class StateManager:
             await db.commit()
             return cursor.rowcount
 
+    async def approve_selected_outbox(self, item_ids: list[str]) -> int:
+        """Approve only selected pending drafts. Held drafts require one-by-one review."""
+        if not item_ids or len(item_ids) > 100 or len(set(item_ids)) != len(item_ids):
+            raise ValueError("Select between 1 and 100 distinct drafts.")
+        async with self._connect() as db:
+            placeholders = ",".join("?" for _ in item_ids)
+            cursor = await db.execute(
+                "UPDATE outbox SET status = 'approved', approved_by = 'you', error = '', "
+                f"updated_at = ? WHERE id IN ({placeholders}) AND status = 'pending_review' "
+                "AND COALESCE(error, '') NOT LIKE ?",
+                (_utcnow().isoformat(), *item_ids, HELD_FOR_REVIEW + "%"),
+            )
+            await db.commit()
+            return cursor.rowcount
+
     async def note_sends_held(self, reason: str):
         """The heartbeat held sending this cycle. Keeps when it started."""
         now = _utcnow().isoformat()
