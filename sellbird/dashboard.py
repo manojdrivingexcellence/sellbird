@@ -1377,6 +1377,25 @@ async def outbox_approve_all():
         return JSONResponse({"success": False, "message": str(e)}, status_code=500)
 
 
+@app.post("/api/outbox/approve-selected")
+async def outbox_approve_selected(request: Request):
+    """Approve selected reviewed drafts, excluding any held for individual review."""
+    try:
+        body = await request.json()
+        ids = body.get("ids") if isinstance(body, dict) else None
+        if (not isinstance(ids, list) or not ids or len(ids) > 100
+                or any(not isinstance(i, str) or not i for i in ids)):
+            return JSONResponse({"success": False, "message": "Select 1 to 100 drafts."}, status_code=400)
+        state = _state()
+        await state.init_db()
+        count = await state.approve_selected_outbox(ids)
+        return {"success": True, "approved": count, "skipped": len(ids) - count}
+    except ValueError as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+
+
 @app.post("/api/outbox/{item_id}/approve")
 async def outbox_approve(item_id: str):
     try:
