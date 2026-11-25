@@ -1377,6 +1377,25 @@ async def outbox_approve_all():
         return JSONResponse({"success": False, "message": str(e)}, status_code=500)
 
 
+@app.post("/api/outbox/approve-selected")
+async def outbox_approve_selected(request: Request):
+    """Approve selected reviewed drafts, excluding any held for individual review."""
+    try:
+        body = await request.json()
+        ids = body.get("ids") if isinstance(body, dict) else None
+        if (not isinstance(ids, list) or not ids or len(ids) > 100
+                or any(not isinstance(i, str) or not i for i in ids)):
+            return JSONResponse({"success": False, "message": "Select 1 to 100 drafts."}, status_code=400)
+        state = _state()
+        await state.init_db()
+        count = await state.approve_selected_outbox(ids)
+        return {"success": True, "approved": count, "skipped": len(ids) - count}
+    except ValueError as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=400)
+    except Exception as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+
+
 @app.post("/api/outbox/{item_id}/approve")
 async def outbox_approve(item_id: str):
     try:
@@ -2303,6 +2322,19 @@ async def get_live_status():
     read), so a finished step always reaches 100% instead of sticking.
     """
     now = datetime.now(timezone.utc).replace(tzinfo=None)  # DB stores naive UTC
+    from sellbird.main import LOOP_STATUS_KEY
+    loop_status = None
+    if _check_sellbird_pid():
+        try:
+            rows = await query_db("SELECT value FROM settings WHERE key = ?", (LOOP_STATUS_KEY,))
+            recorded = json.loads(rows[0]["value"]) if rows else {}
+            seen = datetime.fromisoformat(recorded.get("recorded_at", ""))
+            # A crashed or replaced loop must not leave yesterday's pause on screen.
+            if (0 <= (datetime.now(timezone.utc) - seen).total_seconds() < 7200
+                    and recorded.get("phase") in ("running", "interval", "quiet_hours", "paused", "usage")):
+                loop_status = recorded
+        except (ValueError, TypeError, KeyError):
+            pass
     has_site = "COALESCE(domain, '') != ''"
     companies = await _scalar("SELECT COUNT(*) FROM companies")
     with_site = await _scalar(f"SELECT COUNT(*) FROM companies WHERE {has_site}")
@@ -2426,6 +2458,8 @@ async def get_live_status():
         next_up, next_tab = "A job stopped before finishing. Run it again.", "discover"
     elif sellbird_sends and awaiting_review:
         next_up, next_tab = f"Review the {awaiting_review} draft(s) waiting in the Outbox.", "outbox"
+    elif loop_status and loop_status["phase"] in ("usage", "paused", "quiet_hours"):
+        next_up, next_tab = loop_status["detail"], "usage" if loop_status["phase"] == "usage" else "controls"
     elif by_hand:
         next_up, next_tab = f"Open Campaigns and send the {len(by_hand)} unsent email(s).", "campaigns"
     elif profiled > checked:
@@ -2441,6 +2475,7 @@ async def get_live_status():
         "steps": steps,
         "running": [dict(r, eta_text=_eta_text(r["eta_min"])) for r in running],
         "stopped": stopped,
+        "loop_status": loop_status,
         "next": next_up,
         "next_tab": next_tab,
         "cost_usd": round(cost, 4),
