@@ -130,12 +130,22 @@
   <div class="section-head">
     <div>
       <h2>Today</h2>
-      <p>What's waiting on you, and how the pipeline is moving.</p>
+      <p>Find contacts, review drafts, and decide what gets sent.</p>
     </div>
   </div>
 
   <div id="today-renamed"></div>
   <div id="today-setup"></div>
+
+  <div class="card" style="margin:16px 0">
+    <h3>Daily work</h3>
+    <p class="muted">Start a focused search, check the people found, then review each email before approving it.</p>
+    <div class="btn-group">
+      <button class="btn btn-primary" onclick="goTab('discover')">1. Find contacts</button>
+      <button class="btn btn-secondary" onclick="goTab('contacts')">2. Review contacts</button>
+      <button class="btn btn-secondary" onclick="goTab('outbox')">3. Review and approve emails <span id="today-draft-count"></span></button>
+    </div>
+  </div>
 
   <div id="today-kpis"></div>
   <div id="daily-summary"></div>
@@ -180,8 +190,8 @@
   <div class="section-head">
     <div>
       <h2>Signals</h2>
-      <p>Sellbird proposes what it knows how to look for. You decide what actually
-         defines a good prospect &mdash; nothing is collected until you confirm it.</p>
+      <p>Signals are detection rules, not contacts. Choose only the business clues
+         relevant to your search; you can leave the other proposed rules undecided.</p>
     </div>
   </div>
   <div id="signals-summary"></div>
