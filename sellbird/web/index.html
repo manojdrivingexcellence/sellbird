@@ -148,6 +148,13 @@
       <div class="form-group"><label class="form-label" for="work-goal">Verified contacts to prepare</label>
         <input class="form-input" id="work-goal" type="number" min="1" max="10" value="5"></div>
     </div>
+    <div class="form-row">
+      <div class="form-group"><label class="form-label" for="work-industries">Industries to search</label>
+        <textarea class="form-input" id="work-industries" rows="2" placeholder="One industry per line"></textarea></div>
+      <div class="form-group"><label class="form-label" for="work-titles">Preferred contact titles</label>
+        <textarea class="form-input" id="work-titles" rows="2" placeholder="One title per line"></textarea></div>
+    </div>
+    <p class="muted">These start with your saved business profile. Changes here apply to this search only.</p>
     <div class="btn-group">
       <button class="btn btn-secondary" onclick="estimateWorkspace()">Check search</button>
       <button class="btn btn-primary" id="work-start" onclick="startWorkspace()" disabled>Check search first</button>
