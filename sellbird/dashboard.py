@@ -2167,6 +2167,27 @@ async def contact_session_status():
             "running": bool(_contact_session_task and not _contact_session_task.done())}
 
 
+@app.get("/api/contact-session/resume-check")
+async def contact_session_resume_check():
+    """Check the real subscription ceiling without starting a session."""
+    from sellbird.workspace_home import require_self_hosted
+    from sellbird.config import load_config
+    from sellbird.brain import Brain
+    require_self_hosted("local_discovery")
+    state = _state()
+    await state.init_db()
+    config = load_config()
+    brain = Brain(state, config.brain)
+    problem = await brain.preflight()
+    if problem:
+        return {"can_resume": False, "reason": str(problem),
+                "ceiling": config.usage.max_daily_claude_percent}
+    percent = config.usage.max_daily_claude_percent
+    allowed = await brain.is_within_budget(max(int(200 * percent / 100), 1), percent)
+    return {"can_resume": allowed, "reason": "" if allowed else brain.budget_reason,
+            "ceiling": percent}
+
+
 @app.get("/api/contact-session/decisions")
 async def contact_session_decisions():
     """Individual search exclusions and unusable new contacts from this run."""
@@ -2304,6 +2325,15 @@ async def start_contact_session(request: Request):
         config = load_config()
         if config.channels.email.provider not in ("gmail", "microsoft", "smtp"):
             raise ValueError("Focused Outbox review needs Gmail, Microsoft 365 or SMTP.")
+        if resume and hasattr(config, "brain") and hasattr(config, "usage"):
+            from sellbird.brain import Brain
+            brain = Brain(state, config.brain)
+            percent = config.usage.max_daily_claude_percent
+            if not await brain.is_within_budget(max(int(200 * percent / 100), 1), percent):
+                return JSONResponse({"success": False,
+                                     "message": brain.budget_reason +
+                                     " Wait for usage to fall below the ceiling, then check again."},
+                                    status_code=409)
         queries = _discovery_queries(body, config)
         if len(queries) > 12 or any(q.limit > 30 or q.limit < 1 for q in queries):
             raise ValueError("For a focused session, use at most 12 searches and 1–30 results per query.")
