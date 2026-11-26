@@ -11,6 +11,17 @@ from sellbird.state import StateManager
 from tests.test_dashboard_signals import client  # noqa: F401
 
 
+def test_session_targets_override_only_this_run():
+    saved = SimpleNamespace(icp=SimpleNamespace(
+        industries=["Clinic"], titles=["Owner"]))
+    run = dash._session_target_config(
+        {"industries": ["Training institute"], "titles": ["Director"]}, saved)
+    assert run.icp.industries == ["Training institute"]
+    assert run.icp.titles == ["Director"]
+    assert saved.icp.industries == ["Clinic"]
+    assert saved.icp.titles == ["Owner"]
+
+
 def test_dashboard_rejects_invalid_goal_before_starting(client, monkeypatch):
     monkeypatch.setattr(dash, "_check_sellbird_pid", lambda: None)
     response = client.post("/api/contact-session", json={"goal": 0, "provider": "osm"})
