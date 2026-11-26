@@ -22,6 +22,43 @@ def test_session_targets_override_only_this_run():
     assert saved.icp.titles == ["Owner"]
 
 
+def test_focused_search_enables_only_basic_rules_on_fresh_install(client):
+    import asyncio
+
+    async def check():
+        state = StateManager(str(dash.DB_PATH))
+        await state.init_db()
+        enabled = await dash._ensure_focused_signals(state)
+        assert set(enabled) == set(dash.FOCUSED_SIGNAL_DEFAULTS)
+        assert await state.confirmed_signal_codes() == set(enabled)
+        assert await dash._ensure_focused_signals(state) == []
+        for code in dash.FOCUSED_SIGNAL_DEFAULTS:
+            await state.set_signal_status(code, "rejected")
+        # Existing choices are never silently restored.
+        with pytest.raises(ValueError, match="No search rules are enabled"):
+            await dash._ensure_focused_signals(state)
+        assert not await state.confirmed_signal_codes()
+
+    asyncio.run(check())
+
+
+def test_focused_search_respects_rejected_rules(client):
+    import asyncio
+
+    async def check():
+        state = StateManager(str(dash.DB_PATH))
+        await state.init_db()
+        from sellbird.signals import seed_signal_catalog
+        await seed_signal_catalog(state)
+        for code in dash.FOCUSED_SIGNAL_DEFAULTS:
+            await state.set_signal_status(code, "rejected")
+        with pytest.raises(ValueError, match="No search rules are enabled"):
+            await dash._ensure_focused_signals(state)
+        assert not await state.confirmed_signal_codes()
+
+    asyncio.run(check())
+
+
 def test_dashboard_rejects_invalid_goal_before_starting(client, monkeypatch):
     monkeypatch.setattr(dash, "_check_sellbird_pid", lambda: None)
     response = client.post("/api/contact-session", json={"goal": 0, "provider": "osm"})
