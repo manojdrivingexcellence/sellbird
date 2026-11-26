@@ -2377,7 +2377,7 @@ async def start_contact_session(request: Request):
         config = _session_target_config(body, load_config())
         if config.channels.email.provider not in ("gmail", "microsoft", "smtp"):
             raise ValueError("Focused Outbox review needs Gmail, Microsoft 365 or SMTP.")
-        if resume and hasattr(config, "brain") and hasattr(config, "usage"):
+        if hasattr(config, "brain") and hasattr(config, "usage"):
             from sellbird.brain import Brain
             brain = Brain(state, config.brain)
             percent = config.usage.max_daily_claude_percent
