@@ -520,13 +520,33 @@ let _workEditing = null;
 let _workSelected = new Set();
 let _workResumeReady = false;
 let _workResumeReason = '';
+let _workTargetsLoaded = false;
 document.addEventListener('input', e => {
-  if (e.target.id === 'work-city' || e.target.id === 'work-goal') workspaceResetEstimate();
+  if (['work-city', 'work-goal', 'work-industries', 'work-titles'].includes(e.target.id)) workspaceResetEstimate();
 });
+
+async function loadWorkspaceTargets() {
+  if (_workTargetsLoaded) return;
+  const data = await api('/api/company');
+  if (!data || !data.icp) return;
+  const industries = document.getElementById('work-industries');
+  const titles = document.getElementById('work-titles');
+  const city = document.getElementById('work-city');
+  if (!industries || !titles || !city) return;
+  if (!industries.value) industries.value = (data.icp.industries || []).join('\n');
+  if (!titles.value) titles.value = (data.icp.titles || []).join('\n');
+  if (!city.value && (data.icp.geography || []).length === 1) city.value = data.icp.geography[0];
+  _workTargetsLoaded = true;
+}
+
+function workspaceTerms(id) {
+  return document.getElementById(id).value.split(/[\n;,]/).map(v => v.trim()).filter(Boolean);
+}
 
 function workspaceSearch() {
   const city = document.getElementById('work-city').value.trim();
   return {provider: _workProvider, cities: city ? [city] : [], preset: '',
+    industries: workspaceTerms('work-industries'), titles: workspaceTerms('work-titles'),
     depth: 30, limit: 20, max_spend: 1};
 }
 
@@ -540,6 +560,7 @@ function workspaceResetEstimate() {
 
 async function estimateWorkspace() {
   workspaceResetEstimate();
+  await loadWorkspaceTargets();
   const el = document.getElementById('work-estimate');
   const goal = Number(document.getElementById('work-goal').value);
   if (!Number.isInteger(goal) || goal < 1 || goal > 10) {
@@ -554,6 +575,9 @@ async function estimateWorkspace() {
     return;
   }
   const settings = workspaceSearch();
+  if (!settings.industries.length || !settings.titles.length) {
+    el.textContent = 'Enter at least one industry and one preferred contact title.'; return;
+  }
   el.textContent = 'Checking search…';
   const quote = await api('/api/discover/estimate', {method: 'POST',
     headers: {'Content-Type': 'application/json'}, body: JSON.stringify(settings)});
@@ -671,6 +695,7 @@ async function workspaceApproveSelected() {
 async function loadCustomerWorkspace() {
   const progress = document.getElementById('work-progress');
   if (!progress) return;
+  loadWorkspaceTargets();
   // Never overwrite a message while the customer is typing a correction.
   if (_workEditing && document.getElementById('work-body')) return;
   const [session, contacts, outbox, mode, engine] = await Promise.all([
