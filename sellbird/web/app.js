@@ -518,6 +518,8 @@ let _workProvider = null;
 let _workDraft = 0;
 let _workEditing = null;
 let _workSelected = new Set();
+let _workResumeReady = false;
+let _workResumeReason = '';
 document.addEventListener('input', e => {
   if (e.target.id === 'work-city' || e.target.id === 'work-goal') workspaceResetEstimate();
 });
@@ -571,6 +573,8 @@ async function estimateWorkspace() {
 
 async function startWorkspace() {
   if (!_workSearch || _workBusy) return;
+  _workResumeReady = false;
+  _workResumeReason = '';
   _workBusy = true;
   const el = document.getElementById('work-progress');
   const result = await api('/api/contact-session', {method: 'POST',
@@ -594,8 +598,19 @@ async function workspaceStop() {
 async function workspaceResume() {
   const result = await api('/api/contact-session', {method: 'POST',
     headers: {'Content-Type': 'application/json'}, body: JSON.stringify({resume: true})});
+  _workResumeReady = false;
+  if (!result || !result.success) _workResumeReason = failMsg(result, 'Could not continue.');
   showToast(result && result.success ? 'Continuing the session.' : failMsg(result, 'Could not continue.'),
     result && result.success ? 'success' : 'error');
+  loadCustomerWorkspace();
+}
+
+async function workspaceCheckResume() {
+  const result = await api('/api/contact-session/resume-check');
+  _workResumeReady = Boolean(result && result.can_resume);
+  _workResumeReason = result ? result.reason || '' : 'Could not check model availability.';
+  showToast(_workResumeReady ? 'Model available. You can continue the saved search.' :
+    _workResumeReason, _workResumeReady ? 'success' : 'error');
   loadCustomerWorkspace();
 }
 
@@ -677,12 +692,18 @@ async function loadCustomerWorkspace() {
       ? '<div class="banner wait">' + outbox.approved.length + ' approved email(s) are waiting. Sending runs only while Sellbird is running. ' +
         '<button class="btn btn-secondary btn-sm" onclick="startSellbird().then(loadCustomerWorkspace)">Start scheduled sending and background work</button></div>' : '') +
     (session.phase ? '<p><b>' + escHtml(session.message || session.phase) + '</b> · ' +
+      Number(session.companies_found || 0) + ' new companies · ' +
       Number(session.contacts_found || 0) + ' people found · ' +
       Number(session.verified_contacts || 0) + ' verified · ' +
       Number(session.drafts_ready || 0) + ' drafts ready</p>' +
+      (_workResumeReason ? '<p class="muted">' + escHtml(_workResumeReason) + '</p>' : '') +
       (running ? '<button class="btn btn-secondary btn-sm" onclick="workspaceStop()">Stop search</button>' :
-        ['paused', 'stopped', 'interrupted', 'failed'].includes(session.phase) && session.settings
-          ? '<button class="btn btn-secondary btn-sm" onclick="workspaceResume()">Continue search</button>' : '') +
+        session.phase === 'paused' && session.settings
+          ? (_workResumeReady
+              ? '<button class="btn btn-primary btn-sm" onclick="workspaceResume()">Continue saved search</button>'
+              : '<button class="btn btn-secondary btn-sm" onclick="workspaceCheckResume()">Check availability</button>')
+          : ['stopped', 'interrupted', 'failed'].includes(session.phase) && session.settings
+            ? '<button class="btn btn-secondary btn-sm" onclick="workspaceResume()">Continue saved search</button>' : '') +
       (session.discovery_complete ? ' <button class="btn btn-ghost btn-sm" onclick="showLeadDecisions(\'work-decisions\')">Why were results excluded?</button>' : '')
       : '<p class="muted">No focused session has run yet.</p>');
 
@@ -1349,7 +1370,9 @@ async function loadContactSession() {
         ' · model cost $' + Number(data.model_cost_usd || 0).toFixed(4)) +
       (data.duration_seconds == null ? '' : ' · ' + Math.ceil(Number(data.duration_seconds) / 60) + ' min') + '</p>' : '') +
     (data.running ? '<button class="btn btn-danger btn-sm" onclick="stopContactSession()">Stop session</button>' :
-      (['paused', 'stopped', 'interrupted', 'failed'].includes(data.phase) && data.settings ?
+      (data.phase === 'paused' && data.settings ?
+        '<button class="btn btn-primary btn-sm" onclick="goTab(\'today\')">Check availability on Work</button> ' :
+       ['stopped', 'interrupted', 'failed'].includes(data.phase) && data.settings ?
         '<button class="btn btn-primary btn-sm" onclick="resumeContactSession()">Continue session</button> ' : '') +
       '<button class="btn btn-secondary btn-sm" onclick="goTab(\'contacts\')">Review contacts</button> ' +
       '<button class="btn btn-secondary btn-sm" onclick="goTab(\'outbox\')">Review drafts</button>') +
