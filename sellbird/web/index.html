@@ -78,15 +78,16 @@
 
   <nav aria-label="Sections">
     <div class="nav-group">
-      <div class="nav-label">Work</div>
-      <button class="active" onclick="showTab('today', this)"><svg class="icon" aria-hidden="true"><use href="#i-today"/></svg><span class="label">Today</span><span class="nav-count" id="nav-today"></span></button>
-      <button onclick="showTab('company', this)"><svg class="icon" aria-hidden="true"><use href="#i-company"/></svg><span class="label">Your company</span><span class="nav-count" id="nav-company"></span></button>
+      <div class="nav-label">Your workspace</div>
+      <button class="active" onclick="showTab('today', this)"><svg class="icon" aria-hidden="true"><use href="#i-today"/></svg><span class="label">Work</span><span class="nav-count" id="nav-today"></span></button>
+      <button onclick="showTab('results', this)"><svg class="icon" aria-hidden="true"><use href="#i-contacts"/></svg><span class="label">Results</span></button>
+      <button onclick="showTab('company', this)"><svg class="icon" aria-hidden="true"><use href="#i-company"/></svg><span class="label">Your business</span><span class="nav-count" id="nav-company"></span></button>
+    </div>
+    <details class="nav-advanced"><summary>Advanced tools</summary>
+    <div class="nav-group">
       <button onclick="showTab('outbox', this)"><svg class="icon" aria-hidden="true"><use href="#i-outbox"/></svg><span class="label">Outbox</span><span class="nav-count" id="nav-outbox"></span></button>
       <button onclick="showTab('inboxes', this)"><svg class="icon" aria-hidden="true"><use href="#i-inboxes"/></svg><span class="label">Inboxes</span></button>
       <button onclick="showTab('conversations', this)"><svg class="icon" aria-hidden="true"><use href="#i-conversations"/></svg><span class="label">Conversations</span><span class="nav-count" id="nav-conversations"></span></button>
-    </div>
-    <div class="nav-group">
-      <div class="nav-label">Pipeline</div>
       <button onclick="showTab('signals', this)"><svg class="icon" aria-hidden="true"><use href="#i-signals"/></svg><span class="label">Signals</span><span class="nav-count" id="nav-signals"></span></button>
       <button onclick="showTab('discover', this)"><svg class="icon" aria-hidden="true"><use href="#i-discover"/></svg><span class="label">Discover</span></button>
       <button onclick="showTab('companies', this)"><svg class="icon" aria-hidden="true"><use href="#i-companies"/></svg><span class="label">Companies</span></button>
@@ -94,13 +95,13 @@
       <button onclick="showTab('campaigns', this)"><svg class="icon" aria-hidden="true"><use href="#i-campaigns"/></svg><span class="label">Campaigns</span></button>
     </div>
     <div class="nav-group">
-      <div class="nav-label">System</div>
       <button onclick="showTab('activity', this)"><svg class="icon" aria-hidden="true"><use href="#i-activity"/></svg><span class="label">Activity</span></button>
       <button onclick="showTab('usage', this)"><svg class="icon" aria-hidden="true"><use href="#i-usage"/></svg><span class="label">Usage</span></button>
       <button onclick="showTab('controls', this)"><svg class="icon" aria-hidden="true"><use href="#i-controls"/></svg><span class="label">Controls</span></button>
       <button onclick="showTab('settings', this)"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg><span class="label">Settings</span></button>
       <button onclick="showTab('help', this)"><svg class="icon" aria-hidden="true"><use href="#i-help"/></svg><span class="label">Help</span></button>
     </div>
+    </details>
   </nav>
 
   <div class="sidebar-foot">
@@ -129,8 +130,8 @@
 <div id="today" class="section active">
   <div class="section-head">
     <div>
-      <h2>Today</h2>
-      <p>Find contacts, review drafts, and decide what gets sent.</p>
+      <h2>Work</h2>
+      <p>Find contacts, check the evidence, and decide what gets sent.</p>
     </div>
   </div>
 
@@ -138,8 +139,8 @@
   <div id="today-setup"></div>
 
   <div class="card" style="margin:16px 0" id="customer-workspace">
-    <h3>Daily work</h3>
-    <p class="muted">Find people, check their details and review emails here. Your setup provider can adjust search sources and other advanced settings.</p>
+    <h3>Find, review and send</h3>
+    <p class="muted">Your saved business profile guides the search. Review every contact and email before sending.</p>
     <div class="subhead">1. Find contacts</div>
     <div class="form-row">
       <div class="form-group"><label class="form-label" for="work-city">City or area</label>
@@ -154,9 +155,9 @@
     <div id="work-estimate" aria-live="polite"></div>
     <div id="work-progress" aria-live="polite"></div>
     <div id="work-decisions"></div>
-    <div class="subhead">2. Check contacts <span class="hint"><a href="#" onclick="goTab('prospects');return false">All contacts</a></span></div>
+    <div class="subhead">2. Check contacts</div>
     <div id="work-contacts"></div>
-    <div class="subhead">3. Review emails <span class="hint"><a href="#" onclick="goTab('outbox');return false">Full Outbox and bulk review</a></span></div>
+    <div class="subhead">3. Review emails</div>
     <div id="work-drafts"></div>
   </div>
 
@@ -187,6 +188,11 @@
     </aside>
   </div>
   </details>
+</div>
+
+<div id="results" class="section">
+  <div class="section-head"><div><h2>Results</h2><p>What happened after you reviewed the contacts and emails.</p></div></div>
+  <div id="customer-results"></div>
 </div>
 
 <!-- Signals: the confirmation gate -->
