@@ -2073,6 +2073,34 @@ _discovery_kind = "discover"   # or "profile": reading sites has no stop switch
 _contact_session_task: asyncio.Task | None = None
 _contact_session_report: dict | None = None
 
+# Basic observations needed for a focused contact search. These describe how
+# a business/person was found; they do not claim a business needs a service.
+FOCUSED_SIGNAL_DEFAULTS = (
+    "FOUND_IN_SERP", "TECH_STACK", "CONTACT_FOUND",
+    "DECISION_MAKER_TITLE", "EMAIL_STATUS",
+)
+
+
+async def _ensure_focused_signals(state) -> list[str]:
+    """Enable a small starter set only on an untouched signal catalogue.
+
+    Respect every prior confirmation or rejection. Proposed starter rules can
+    be enabled, but a rejected rule is never silently restored.
+    """
+    from sellbird.signals import seed_signal_catalog
+
+    await seed_signal_catalog(state)
+    codes = await state.get_signal_codes()
+    if any(c["status"] == "confirmed" for c in codes):
+        return []
+    available = {c["code"] for c in codes if c["status"] == "proposed"}
+    enabled = [code for code in FOCUSED_SIGNAL_DEFAULTS if code in available]
+    if not enabled:
+        raise ValueError("No search rules are enabled. Open Advanced tools → Signals and turn on at least one rule.")
+    for code in enabled:
+        await state.set_signal_status(code, "confirmed")
+    return enabled
+
 
 def _session_target_config(body: dict, config):
     """Apply customer choices to this run without changing saved targeting."""
@@ -2366,6 +2394,7 @@ async def start_contact_session(request: Request):
             raise ValueError("Choose a spend cap between $0 and $50.")
         if estimate_cost(provider, queries) > max_spend:
             raise ValueError("Search estimate is over your spend cap. Narrow the search first.")
+        enabled_signals = await _ensure_focused_signals(state)
         await state.set_setting("discovery_paused", "")
         usage_before = (await state.usage_totals())["today"]
         report = {**(previous if resume else {}), "phase": "starting", "goal": goal,
@@ -2375,6 +2404,7 @@ async def start_contact_session(request: Request):
                   "companies_found": previous.get("companies_found", 0) if resume else 0,
                   "message": "Continuing your session." if resume else "Starting your session.",
                   "provider": provider, "started_at": (previous.get("started_at") if resume else None) or datetime.now(timezone.utc).isoformat(),
+                  "starter_signals_enabled": enabled_signals,
                   "segment_started_at": datetime.now(timezone.utc).isoformat(),
                   "settings": {k: body.get(k) for k in ("provider", "goal", "cities", "industries", "titles", "depth", "limit", "preset", "max_spend")},
                   "usage_start_calls": int(usage_before.get("calls") or 0),
