@@ -197,6 +197,9 @@ def test_continue_reports_quota_block_before_restarting(client, monkeypatch):
     response = client.post("/api/contact-session", json={"resume": True})
     assert response.status_code == 409
     assert "81%" in response.json()["message"]
+    fresh = client.post("/api/contact-session", json={"provider": "osm", "goal": 5})
+    assert fresh.status_code == 409
+    assert "81%" in fresh.json()["message"]
     assert client.get("/api/contact-session").json()["phase"] == "paused"
     check = client.get("/api/contact-session/resume-check")
     assert check.status_code == 200
