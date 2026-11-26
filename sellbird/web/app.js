@@ -589,7 +589,7 @@ async function estimateWorkspace() {
   _workSearch = {...settings, goal};
   el.textContent = quote.query_count + ' searches · ' +
     (quote.free ? 'no search charge' : 'estimated search cost $' + Number(quote.estimated_cost).toFixed(2)) +
-    ' · this prepares drafts, it does not send emails.';
+    ' · basic search checks are enabled on the first run if none were chosen · this prepares drafts, it does not send emails.';
   const start = document.getElementById('work-start');
   start.disabled = false;
   start.textContent = 'Find ' + goal + ' contacts';
@@ -721,6 +721,8 @@ async function loadCustomerWorkspace() {
       Number(session.contacts_found || 0) + ' people found · ' +
       Number(session.verified_contacts || 0) + ' verified · ' +
       Number(session.drafts_ready || 0) + ' drafts ready</p>' +
+      ((session.starter_signals_enabled || []).length
+        ? '<p class="muted">Basic search checks enabled for this installation. You can review them under Advanced tools → Signals.</p>' : '') +
       (_workResumeReason ? '<p class="muted">' + escHtml(_workResumeReason) + '</p>' : '') +
       (running ? '<button class="btn btn-secondary btn-sm" onclick="workspaceStop()">Stop search</button>' :
         session.phase === 'paused' && session.settings
