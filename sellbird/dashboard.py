@@ -2198,6 +2198,28 @@ async def contact_session_decisions():
     return {"companies": rejected, "contacts": contacts[:500]}
 
 
+@app.get("/api/contact-session/contacts")
+async def contact_session_contacts():
+    """Only people newly found in the latest focused session, newest first."""
+    from sellbird.workspace_home import require_self_hosted
+    require_self_hosted("local_discovery")
+    state = _state()
+    await state.init_db()
+    try:
+        report = _contact_session_report or json.loads(
+            await state.get_setting("focused_session_report") or "{}")
+    except (ValueError, TypeError):
+        report = {}
+    if not report.get("session_id") or "baseline_people" not in report:
+        return []
+    baseline = set(report.get("baseline_people") or [])
+    rows = await query_db(
+        "SELECT p.id, p.first_name, p.last_name, p.company, p.title, p.email, "
+        "p.email_status, p.status, p.source, p.source_url, p.personalization_notes, "
+        "p.created_at FROM prospects p ORDER BY p.created_at DESC LIMIT 2000")
+    return [p for p in rows if p["id"] not in baseline][:100]
+
+
 @app.get("/api/daily-summary")
 async def daily_summary(tz: int = 0):
     """Operator-started sessions on the viewer's local day, including pauses."""
