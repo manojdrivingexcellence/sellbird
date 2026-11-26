@@ -2074,6 +2074,30 @@ _contact_session_task: asyncio.Task | None = None
 _contact_session_report: dict | None = None
 
 
+def _session_target_config(body: dict, config):
+    """Apply customer choices to this run without changing saved targeting."""
+    import copy
+
+    overrides = {}
+    for field, maximum in (("industries", 5), ("titles", 10)):
+        if field not in body:
+            continue
+        values = body[field]
+        if (not isinstance(values, list) or not values or len(values) > maximum
+                or any(not isinstance(v, str) or not v.strip() or len(v) > 100
+                       for v in values)):
+            raise ValueError(f"Choose 1–{maximum} {field}, each under 100 characters.")
+        overrides[field] = list(dict.fromkeys(v.strip() for v in values))
+    if not overrides:
+        return config
+    if not hasattr(config, "icp"):
+        raise ValueError("Target industries and titles are not configured.")
+    targeted = config.model_copy(deep=True) if hasattr(config, "model_copy") else copy.deepcopy(config)
+    for field, values in overrides.items():
+        setattr(targeted.icp, field, values)
+    return targeted
+
+
 def _discovery_queries(body: dict, config):
     from sellbird.collectors.discover import build_queries, preset_problem
 
@@ -2128,7 +2152,7 @@ async def estimate_discovery(request: Request):
                                 status_code=400)
 
         try:
-            queries = _discovery_queries(body, load_config())
+            queries = _discovery_queries(body, _session_target_config(body, load_config()))
         except ValueError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
         return {
@@ -2322,7 +2346,7 @@ async def start_contact_session(request: Request):
         provider = body.get("provider") or ""
         if provider not in PROVIDERS:
             raise ValueError("Choose a discovery source first.")
-        config = load_config()
+        config = _session_target_config(body, load_config())
         if config.channels.email.provider not in ("gmail", "microsoft", "smtp"):
             raise ValueError("Focused Outbox review needs Gmail, Microsoft 365 or SMTP.")
         if resume and hasattr(config, "brain") and hasattr(config, "usage"):
@@ -2352,7 +2376,7 @@ async def start_contact_session(request: Request):
                   "message": "Continuing your session." if resume else "Starting your session.",
                   "provider": provider, "started_at": (previous.get("started_at") if resume else None) or datetime.now(timezone.utc).isoformat(),
                   "segment_started_at": datetime.now(timezone.utc).isoformat(),
-                  "settings": {k: body.get(k) for k in ("provider", "goal", "cities", "depth", "limit", "preset", "max_spend")},
+                  "settings": {k: body.get(k) for k in ("provider", "goal", "cities", "industries", "titles", "depth", "limit", "preset", "max_spend")},
                   "usage_start_calls": int(usage_before.get("calls") or 0),
                   "usage_start_cost_usd": float(usage_before.get("cost_usd") or 0),
                   "searches": len(queries), "estimated_search_cost_usd": round(estimate_cost(provider, queries), 4)}
