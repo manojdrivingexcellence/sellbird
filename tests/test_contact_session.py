@@ -114,6 +114,47 @@ def test_continue_reuses_saved_search_settings(client, monkeypatch):
     assert seen == {"provider": "osm", "goal": 3, "resume": True}
 
 
+def test_continue_reports_quota_block_before_restarting(client, monkeypatch):
+    import asyncio
+    import json
+    import sellbird.config as config_mod
+    import sellbird.brain as brain_mod
+
+    monkeypatch.setattr(dash, "_check_sellbird_pid", lambda: None)
+    monkeypatch.setattr(dash, "_contact_session_task", None)
+    monkeypatch.setattr(config_mod, "load_config", lambda: SimpleNamespace(
+        channels=SimpleNamespace(email=SimpleNamespace(provider="smtp")),
+        brain=SimpleNamespace(provider="codex"),
+        usage=SimpleNamespace(max_daily_claude_percent=80)))
+
+    async def save():
+        state = StateManager(str(dash.DB_PATH))
+        await state.init_db()
+        await state.set_setting("focused_session_report", json.dumps({
+            "phase": "paused", "message": "Codex usage is 81%, at or above the configured 80% ceiling.",
+            "settings": {"provider": "osm", "goal": 5}}))
+    asyncio.run(save())
+
+    class OverBudget:
+        def __init__(self, state, config):
+            self.budget_reason = "Codex usage is 81%, at or above the configured 80% ceiling."
+
+        async def preflight(self):
+            return ""
+
+        async def is_within_budget(self, calls, percent):
+            return False
+
+    monkeypatch.setattr(brain_mod, "Brain", OverBudget)
+    response = client.post("/api/contact-session", json={"resume": True})
+    assert response.status_code == 409
+    assert "81%" in response.json()["message"]
+    assert client.get("/api/contact-session").json()["phase"] == "paused"
+    check = client.get("/api/contact-session/resume-check")
+    assert check.status_code == 200
+    assert check.json()["can_resume"] is False
+
+
 @pytest.mark.asyncio
 async def test_session_reports_model_pause_and_does_not_write(monkeypatch):
     class FakeState:
