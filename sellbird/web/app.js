@@ -659,7 +659,7 @@ async function loadCustomerWorkspace() {
   // Never overwrite a message while the customer is typing a correction.
   if (_workEditing && document.getElementById('work-body')) return;
   const [session, contacts, outbox, mode, engine] = await Promise.all([
-    api('/api/contact-session'), api('/api/prospects'), api('/api/outbox'),
+    api('/api/contact-session'), api('/api/contact-session/contacts'), api('/api/outbox'),
     api('/api/sending-mode'), api('/api/sellbird/status')]);
   if (!session || !Array.isArray(contacts) || !outbox || outbox.error) {
     progress.textContent = 'Could not load daily work. Refresh the dashboard.'; return;
@@ -693,7 +693,7 @@ async function loadCustomerWorkspace() {
       '</td><td>' + escHtml(p.company) + '</td><td>' + escHtml(p.email || 'No email found') +
       '</td><td>' + escHtml(p.email_status || 'Not checked') + '</td><td>' +
       (safeHref(p.source_url) ? '<a href="' + safeHref(p.source_url) + '" target="_blank" rel="noopener noreferrer">Check source</a>' : 'Source unavailable') +
-      '</td></tr>').join('') + '</tbody></table></div>' : '<p class="muted">No contacts found yet.</p>';
+      '</td></tr>').join('') + '</tbody></table></div>' : '<p class="muted">No contacts found in this session yet.</p>';
 
   const drafts = outbox.pending || [];
   _workSelected = new Set([..._workSelected].filter(id =>
