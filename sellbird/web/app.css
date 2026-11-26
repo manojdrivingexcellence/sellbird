@@ -212,6 +212,9 @@ svg.icon { width: 16px; height: 16px; flex: none; stroke: currentColor; fill: no
 
 nav { display: flex; flex-direction: column; gap: var(--sp-4); }
 .nav-group { display: flex; flex-direction: column; gap: 1px; }
+.nav-advanced { border-top: 1px solid var(--line); padding-top: 10px; }
+.nav-advanced summary { cursor: pointer; color: var(--text-3); font: 500 var(--fs-ui)/1.4 var(--sans); padding: 5px 10px; }
+.nav-advanced .nav-group { padding-top: 6px; }
 .nav-label {
   font-size: 11px; font-weight: 500; color: var(--text-3);
   text-transform: uppercase; letter-spacing: 0.06em;
@@ -995,6 +998,10 @@ textarea.form-input { height: auto; padding: 8px 12px; }
   nav { order: 3; width: 100%; flex-direction: row; gap: 2px; overflow-x: auto; scrollbar-width: none; margin: 0 calc(-1 * var(--sp-4)); padding: 0 var(--sp-4) 2px; width: calc(100% + 2 * var(--sp-4)); }
   nav::-webkit-scrollbar { display: none; }
   .nav-group { flex-direction: row; gap: 2px; }
+  .nav-advanced { flex: none; border: 0; padding: 0; }
+  .nav-advanced summary { white-space: nowrap; padding: 7px 10px; }
+  .nav-advanced[open] { display: flex; align-items: center; }
+  .nav-advanced .nav-group { padding: 0; }
   .nav-label { display: none; }
   nav button { width: auto; height: 30px; flex: none; }
   .sidebar-foot { margin: 0 0 0 auto; flex-direction: row; align-items: center; border-top: none; padding: 0; }

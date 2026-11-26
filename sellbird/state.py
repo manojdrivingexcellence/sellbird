@@ -558,6 +558,25 @@ MIGRATIONS: list[str] = [
     ALTER TABLE conversations ADD COLUMN mailbox_id TEXT DEFAULT '';
     CREATE INDEX IF NOT EXISTS idx_outbox_mailbox_sent ON outbox(mailbox_id, status, sent_at);
     """,
+    # ── v17: trace rejected discovery candidates and reviewed replies ──
+    """
+    CREATE TABLE IF NOT EXISTS lead_decisions (
+      id TEXT PRIMARY KEY, run_id TEXT NOT NULL, company_name TEXT DEFAULT '',
+      domain TEXT DEFAULT '', source_url TEXT DEFAULT '', query TEXT DEFAULT '',
+      reason TEXT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+    CREATE INDEX IF NOT EXISTS idx_lead_decisions_run ON lead_decisions(run_id, created_at);
+    CREATE TABLE IF NOT EXISTS reply_reviews (
+      conversation_id TEXT PRIMARY KEY REFERENCES conversations(id),
+      reviewed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+    CREATE TABLE IF NOT EXISTS focused_sessions (
+      id TEXT PRIMARY KEY, started_at TEXT NOT NULL, ended_at TEXT DEFAULT '',
+      phase TEXT DEFAULT 'starting', report_json TEXT DEFAULT '{}');
+    CREATE INDEX IF NOT EXISTS idx_focused_sessions_started ON focused_sessions(started_at);
+    """,
+    # ── v18: exact conversation revision acknowledged by the reviewer ──
+    """
+    ALTER TABLE reply_reviews ADD COLUMN conversation_updated_at TEXT DEFAULT '';
+    """,
 ]
 
 BRAIN_PROVIDERS = ("claude", "codex")
@@ -1380,6 +1399,21 @@ class StateManager:
             await db.commit()
             return cursor.rowcount
 
+    async def approve_selected_outbox(self, item_ids: list[str]) -> int:
+        """Approve only selected pending drafts. Held drafts require one-by-one review."""
+        if not item_ids or len(item_ids) > 100 or len(set(item_ids)) != len(item_ids):
+            raise ValueError("Select between 1 and 100 distinct drafts.")
+        async with self._connect() as db:
+            placeholders = ",".join("?" for _ in item_ids)
+            cursor = await db.execute(
+                "UPDATE outbox SET status = 'approved', approved_by = 'you', error = '', "
+                f"updated_at = ? WHERE id IN ({placeholders}) AND status = 'pending_review' "
+                "AND COALESCE(error, '') NOT LIKE ?",
+                (_utcnow().isoformat(), *item_ids, HELD_FOR_REVIEW + "%"),
+            )
+            await db.commit()
+            return cursor.rowcount
+
     async def note_sends_held(self, reason: str):
         """The heartbeat held sending this cycle. Keeps when it started."""
         now = _utcnow().isoformat()
@@ -1614,6 +1648,15 @@ class StateManager:
         except (json.JSONDecodeError, TypeError, ValueError):
             pass
         return None
+
+    async def has_first_outbox_email(self, campaign_id: str, prospect_id: str) -> bool:
+        """Whether the writer staged a personal first email for this recipient."""
+        async with self._connect() as db:
+            async with db.execute(
+                "SELECT 1 FROM outbox WHERE campaign_id = ? AND prospect_id = ? "
+                "AND step = 1 LIMIT 1", (campaign_id, prospect_id),
+            ) as cursor:
+                return await cursor.fetchone() is not None
 
     async def get_previous_step(self, item: dict) -> dict | None:
         """The email a sequence follow-up follows (same campaign and person,
@@ -2132,6 +2175,51 @@ class StateManager:
 
     # ── Run log (what ran, when, what it produced and cost) ──
 
+    async def record_lead_decisions(self, run_id: str, decisions: list[dict]) -> None:
+        """Record why each search result was discarded, with its evidence."""
+        if not run_id or not decisions:
+            return
+        async with self._connect() as db:
+            await db.executemany(
+                "INSERT INTO lead_decisions "
+                "(id, run_id, company_name, domain, source_url, query, reason) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [(_new_id(), run_id, str(d.get("name") or "")[:200],
+                  str(d.get("domain") or "")[:255], str(d.get("source_url") or "")[:1000],
+                  str(d.get("query") or "")[:250], str(d["reason"])[:80])
+                 for d in decisions],
+            )
+            await db.commit()
+
+    async def lead_decisions(self, run_id: str, limit: int = 500) -> list[dict]:
+        async with self._connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT company_name, domain, source_url, query, reason, created_at "
+                "FROM lead_decisions WHERE run_id = ? ORDER BY created_at, rowid LIMIT ?",
+                (run_id, max(1, min(limit, 1000))),
+            ) as cursor:
+                return [dict(row) for row in await cursor.fetchall()]
+
+    async def save_focused_session(self, report: dict) -> None:
+        async with self._connect() as db:
+            await db.execute(
+                "INSERT INTO focused_sessions (id, started_at, ended_at, phase, report_json) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+                "ended_at=excluded.ended_at, phase=excluded.phase, report_json=excluded.report_json",
+                (report["session_id"], report["started_at"], report.get("ended_at") or "",
+                 report.get("phase") or "", json.dumps(report)),
+            )
+            await db.commit()
+
+    async def recent_focused_sessions(self, limit: int = 100) -> list[dict]:
+        async with self._connect() as db:
+            async with db.execute(
+                "SELECT report_json FROM focused_sessions ORDER BY started_at DESC LIMIT ?",
+                (max(1, min(limit, 500)),),
+            ) as cursor:
+                return [json.loads(row[0]) for row in await cursor.fetchall()]
+
     async def start_run(
         self, stage: str, provider: str = "", params: dict | None = None
     ) -> str:
@@ -2268,6 +2356,11 @@ class StateManager:
         self, email: str = "", linkedin_url: str = "",
         first_name: str = "", last_name: str = "", company: str = "",
     ) -> bool:
+        if email:
+            from sellbird.agency_registry import configured_registry
+            registry = configured_registry()
+            if registry and not await registry.available(email):
+                return True
         async with self._connect() as db:
             if email:
                 async with db.execute(

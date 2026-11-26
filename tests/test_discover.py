@@ -1543,6 +1543,9 @@ async def test_a_forbidden_company_never_becomes_a_row(state, config, register):
     assert report.new_companies == 3
     assert not await state.company_exists("rival.example")
     assert not await state.company_exists("shop.rival.example")
+    decisions = await state.lead_decisions(report.run_id)
+    assert {d["domain"] for d in decisions if d["reason"] == "do_not_contact"} == {
+        "rival.example", "shop.rival.example"}
     # An address entry bars a mailbox, not the company: still discoverable.
     assert await state.company_exists("other.example")
     assert await state.company_exists("notrival.example")

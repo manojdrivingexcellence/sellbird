@@ -508,6 +508,22 @@ class Sender:
         prospects = self._reviewed_leads(prospects)
         if not prospects:
             return
+        try:
+            from sellbird.agency_registry import configured_registry
+            registry = configured_registry()
+            if registry:
+                allowed = []
+                for p in prospects:
+                    if await registry.reserve(p.email):
+                        allowed.append(p)
+                    else:
+                        logger.warning("Sender: holding a lead already reserved in another workspace")
+                prospects = allowed
+                if not prospects:
+                    return
+        except Exception as e:
+            logger.error("Sender: agency registry unavailable; not adding leads: %s", e)
+            return
         leads = [
             {
                 "email": p.email.strip().lower(),
@@ -642,7 +658,7 @@ class Sender:
             text = text.replace("{{ " + key + " }}", value or "")
         return text.strip()
 
-    async def _stage_campaign_native(self, campaign):
+    async def _stage_campaign_native(self, campaign, approval_override: bool = False):
         """Render + schedule a draft campaign's emails into the outbox."""
         if not self._validate_sequence(campaign):
             await self.state.update_campaign(campaign.id, status="failed")
@@ -652,7 +668,7 @@ class Sender:
         require_approval = getattr(
             self.config.channels.email, "require_approval", True
         )
-        initial_status = "pending_review" if require_approval else "approved"
+        initial_status = "pending_review" if require_approval or approval_override else "approved"
         allow_risky = getattr(self.config.channels.email, "send_to_risky", False)
         sendable_email = (
             SENDABLE_EMAIL_STATUSES_WITH_RISKY if allow_risky
@@ -685,6 +701,13 @@ class Sender:
                 continue
             seen_emails.add(email)
 
+            # In evidence-required mode, a failed personal draft must not be
+            # replaced by the generic campaign template (including follow-ups).
+            if getattr(getattr(self.config, "writer", None), "require_tip", False):
+                if not await self.state.has_first_outbox_email(campaign.id, prospect.id):
+                    logger.info("Sender: holding %s until a personal first draft exists", email)
+                    continue
+
             # With a send window, each email is planned for the recipient's
             # office hours; follow-ups keep their delay, then move into it.
             zone = await self._zone_or_default(prospect) if window is not None else ""
@@ -707,7 +730,7 @@ class Sender:
                     send_at=send_at.isoformat(),
                     status=initial_status,
                     provider=self.provider.name,
-                    approved_by="" if require_approval else "autopilot",
+                    approved_by="" if require_approval or approval_override else "autopilot",
                 )
                 if item_id:
                     staged += 1
@@ -731,7 +754,7 @@ class Sender:
                 f"{COLLEAGUE_REPLIED} at their company."
             )
         if staged:
-            mode = "awaiting your approval" if require_approval else "approved"
+            mode = "awaiting your approval" if require_approval or approval_override else "approved"
             logger.info(
                 f"Sender: staged {staged} email(s) for '{campaign.name}' "
                 f"({mode}). Review in the dashboard Outbox tab."
@@ -1174,6 +1197,23 @@ class Sender:
                                                     error=f"held: {NO_HEADERS_HOLD}")
                 continue
             extra = {"headers": headers} if headers else {}
+            # Opt-in agency registry: reserve before the provider call. A
+            # timeout can mean the provider sent it, so never release the
+            # reservation on an uncertain result. Follow-ups from this same
+            # workspace are allowed; a different customer is held back.
+            try:
+                from sellbird.agency_registry import configured_registry
+                registry = configured_registry()
+                if registry and not await registry.reserve(item["to_email"]):
+                    await self.state.update_outbox_item(
+                        item["id"], status="cancelled",
+                        error="Address already contacted by another participating workspace")
+                    continue
+            except Exception as e:
+                logger.error("Sender: agency registry unavailable; holding email: %s", e)
+                await self.state.update_outbox_item(
+                    item["id"], status="approved", error="held: agency registry unavailable")
+                continue
             try:
                 result = await provider.send_email(
                     item["to_email"], item["subject"], body,

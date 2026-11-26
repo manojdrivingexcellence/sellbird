@@ -2,7 +2,7 @@ let currentTab = 'today';
 let companyDrill = false;      // true while viewing a single company's contacts
 let _companies = [], _prospects = [], _campaigns = [];
 let _signals = null;           // last /api/signals payload, for the cohort builder
-let _desk = { items: [], i: 0 };
+let _desk = { items: [], i: 0, selected: new Set() };
 
 // ── Appearance ──
 //
@@ -408,12 +408,22 @@ function showTab(id, btn) {
   document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
   document.getElementById(id).classList.add('active');
   if (btn) btn.classList.add('active');
+  else {
+    const nav = [...document.querySelectorAll('nav button')].find(b =>
+      b.getAttribute('onclick') === "showTab('" + id + "', this)");
+    if (nav) {
+      nav.classList.add('active');
+      const advanced = nav.closest('.nav-advanced');
+      if (advanced) advanced.open = true;
+    }
+  }
   loadCurrentTab();
 }
 
 function loadCurrentTab() {
   switch (currentTab) {
-    case 'today': loadLiveStatus(); loadRenameNotice(); loadToday(); loadTrend(); loadFunnel(); loadSetupStatus(); loadRuns(); loadTodayActivity(); break;
+    case 'today': loadLiveStatus(); loadRenameNotice(); loadToday(); loadCustomerWorkspace(); loadTrend(); loadFunnel(); loadSetupStatus(); loadRuns(); loadTodayActivity(); break;
+    case 'results': loadCustomerResults(); break;
     case 'signals': loadSignals(); break;
     case 'discover': loadDiscoverProviders(); break;
     case 'companies': if (!companyDrill) loadCompanies(); break;
@@ -443,14 +453,17 @@ async function loadToday() {
     return;
   }
 
-  navCount('nav-today', (data.items || []).filter(i => i.tone !== 'good').length);
+  const visibleItems = (data.items || []).filter(i =>
+    i.key !== 'signals' || !(data.stats || {}).signals_confirmed);
+  navCount('nav-today', visibleItems.filter(i => i.tone !== 'good').length);
   navCount('nav-outbox', (data.stats || {}).outbox_pending || 0);
   navCount('nav-signals', (data.stats || {}).signals_proposed || 0);
   navCount('nav-conversations', (data.stats || {}).needs_human || 0);
   _todayStats = data.stats || {};
   renderFigures(_todayStats);
+  loadDailySummary();
 
-  const items = data.items || [];
+  const items = visibleItems;
   if (!items.length) {
     el.innerHTML = '<div class="queue-clear">' +
       '<div class="queue-icon">' + icon('check') + '</div><div>' +
@@ -476,7 +489,325 @@ async function loadToday() {
   }).join('') + '</div>';
 }
 
+async function loadDailySummary() {
+  const el = document.getElementById('daily-summary');
+  if (!el) return;
+  const data = await api('/api/daily-summary?tz=' + -new Date().getTimezoneOffset());
+  if (!data || !data.totals) return;
+  const t = data.totals;
+  if (!Number(data.sessions || 0)) { el.innerHTML = ''; return; }
+  el.innerHTML = '<div class="card" style="margin:16px 0"><b>Focused sessions today · ' +
+    Number(data.sessions || 0) + '</b><p>' + Number(t.companies_found || 0) +
+    ' companies → ' + Number(t.contacts_found || 0) + ' people → ' +
+    Number(t.verified_contacts || 0) + ' verified → ' +
+    Number(t.drafts_ready || 0) + ' drafts ready</p><p class="muted">' +
+    Number(t.missing_email || 0) + ' without email · ' +
+    Number(t.unverified_email || 0) + ' unverified · ' +
+    Number(t.suppressed_email || 0) + ' suppressed · ' +
+    Number(t.model_calls || 0) + ' model calls · $' +
+    (Number(t.search_cost_usd || 0) + Number(t.model_cost_usd || 0)).toFixed(4) +
+    ' search/model cost</p>' + (data.latest || []).map(s => '<p class="muted">' +
+      escHtml(s.phase || '') + ' · ' + escHtml(s.message || '') + '</p>').join('') + '</div>';
+}
+
+// ── Customer daily workspace ──
+
+let _workSearch = null;
+let _workBusy = false;
+let _workProvider = null;
+let _workDraft = 0;
+let _workEditing = null;
+let _workSelected = new Set();
+let _workResumeReady = false;
+let _workResumeReason = '';
+let _workTargetsLoaded = false;
+document.addEventListener('input', e => {
+  if (['work-city', 'work-goal', 'work-industries', 'work-titles'].includes(e.target.id)) workspaceResetEstimate();
+});
+
+async function loadWorkspaceTargets() {
+  if (_workTargetsLoaded) return;
+  const data = await api('/api/company');
+  if (!data || !data.icp) return;
+  const industries = document.getElementById('work-industries');
+  const titles = document.getElementById('work-titles');
+  const city = document.getElementById('work-city');
+  if (!industries || !titles || !city) return;
+  if (!industries.value) industries.value = (data.icp.industries || []).join('\n');
+  if (!titles.value) titles.value = (data.icp.titles || []).join('\n');
+  if (!city.value && (data.icp.geography || []).length === 1) city.value = data.icp.geography[0];
+  _workTargetsLoaded = true;
+}
+
+function workspaceTerms(id) {
+  return document.getElementById(id).value.split(/[\n;,]/).map(v => v.trim()).filter(Boolean);
+}
+
+function workspaceSearch() {
+  const city = document.getElementById('work-city').value.trim();
+  return {provider: _workProvider, cities: city ? [city] : [], preset: '',
+    industries: workspaceTerms('work-industries'), titles: workspaceTerms('work-titles'),
+    depth: 30, limit: 20, max_spend: 1};
+}
+
+function workspaceResetEstimate() {
+  _workSearch = null;
+  const start = document.getElementById('work-start');
+  if (start) { start.disabled = true; start.textContent = 'Check search first'; }
+  const estimate = document.getElementById('work-estimate');
+  if (estimate) estimate.textContent = '';
+}
+
+async function estimateWorkspace() {
+  workspaceResetEstimate();
+  await loadWorkspaceTargets();
+  const el = document.getElementById('work-estimate');
+  const goal = Number(document.getElementById('work-goal').value);
+  if (!Number.isInteger(goal) || goal < 1 || goal > 10) {
+    el.textContent = 'Choose between 1 and 10 contacts.'; return;
+  }
+  const providers = await api('/api/discover/providers');
+  if (!providers || !providers.providers) { el.textContent = 'Could not read search sources.'; return; }
+  _workProvider = providers.selected || providers.default;
+  const source = providers.providers.find(p => p.key === _workProvider);
+  if (!source || !source.configured) {
+    el.innerHTML = 'Search source needs setup. <a href="#" onclick="goTab(\'discover\');return false">Open advanced search</a>.';
+    return;
+  }
+  const settings = workspaceSearch();
+  if (!settings.industries.length || !settings.titles.length) {
+    el.textContent = 'Enter at least one industry and one preferred contact title.'; return;
+  }
+  el.textContent = 'Checking search…';
+  const quote = await api('/api/discover/estimate', {method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify(settings)});
+  if (!quote || quote.error || quote.estimated_cost > settings.max_spend || quote.query_count > 12) {
+    el.textContent = quote && quote.error ? String(quote.error) :
+      'This search is too broad for a daily session. Enter one city or narrow your target in Your company.';
+    return;
+  }
+  _workSearch = {...settings, goal};
+  el.textContent = quote.query_count + ' searches · ' +
+    (quote.free ? 'no search charge' : 'estimated search cost $' + Number(quote.estimated_cost).toFixed(2)) +
+    ' · this prepares drafts, it does not send emails.';
+  const start = document.getElementById('work-start');
+  start.disabled = false;
+  start.textContent = 'Find ' + goal + ' contacts';
+}
+
+async function startWorkspace() {
+  if (!_workSearch || _workBusy) return;
+  _workResumeReady = false;
+  _workResumeReason = '';
+  _workBusy = true;
+  const el = document.getElementById('work-progress');
+  const result = await api('/api/contact-session', {method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify(_workSearch)});
+  _workBusy = false;
+  if (!result || !result.success) {
+    el.textContent = failMsg(result, 'Could not start the search.');
+    return;
+  }
+  workspaceResetEstimate();
+  loadCustomerWorkspace();
+}
+
+async function workspaceStop() {
+  const result = await api('/api/contact-session/stop', {method: 'POST'});
+  showToast(result && result.success ? 'Stopping the session.' : failMsg(result, 'Could not stop.'),
+    result && result.success ? 'success' : 'error');
+  loadCustomerWorkspace();
+}
+
+async function workspaceResume() {
+  const result = await api('/api/contact-session', {method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify({resume: true})});
+  _workResumeReady = false;
+  if (!result || !result.success) _workResumeReason = failMsg(result, 'Could not continue.');
+  showToast(result && result.success ? 'Continuing the session.' : failMsg(result, 'Could not continue.'),
+    result && result.success ? 'success' : 'error');
+  loadCustomerWorkspace();
+}
+
+async function workspaceCheckResume() {
+  const result = await api('/api/contact-session/resume-check');
+  _workResumeReady = Boolean(result && result.can_resume);
+  _workResumeReason = result ? result.reason || '' : 'Could not check model availability.';
+  showToast(_workResumeReady ? 'Model available. You can continue the saved search.' :
+    _workResumeReason, _workResumeReady ? 'success' : 'error');
+  loadCustomerWorkspace();
+}
+
+async function workspaceReview(action, id) {
+  if (_workBusy) return;
+  _workBusy = true;
+  const result = await api('/api/outbox/' + encodeURIComponent(id) + '/' + action, {method: 'POST'});
+  _workBusy = false;
+  showToast(result && result.success ? (action === 'approve' ? 'Approved for scheduled sending.' : 'Draft rejected.') :
+    failMsg(result, 'Could not update the draft.'), result && result.success ? 'success' : 'error');
+  if (result && result.success) loadCustomerWorkspace();
+}
+
+function workspaceEdit(id) {
+  _workEditing = id;
+  loadCustomerWorkspace();
+}
+
+async function workspaceSave(id) {
+  const subject = document.getElementById('work-subject').value.trim();
+  const body = document.getElementById('work-body').value.trim();
+  if (!subject || !body) { showToast('Subject and message are required.', 'error'); return; }
+  if (_workBusy) return;
+  _workBusy = true;
+  const result = await api('/api/outbox/' + encodeURIComponent(id) + '/edit', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({subject, body})});
+  _workBusy = false;
+  if (!result || !result.success) {
+    showToast(failMsg(result, 'Could not save the draft.'), 'error'); return;
+  }
+  _workEditing = null;
+  showToast('Saved. The email still needs approval.', 'success');
+  loadCustomerWorkspace();
+}
+
+function workspaceSelect(id, selected) {
+  if (selected) _workSelected.add(id); else _workSelected.delete(id);
+  const count = document.getElementById('work-selected-count');
+  if (count) count.textContent = String(_workSelected.size);
+}
+
+async function workspaceApproveSelected() {
+  if (!_workSelected.size || _workBusy) return;
+  _workBusy = true;
+  const result = await api('/api/outbox/approve-selected', {method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ids: [..._workSelected]})});
+  _workBusy = false;
+  if (!result || !result.success) {
+    showToast(failMsg(result, 'Could not approve selected emails.'), 'error'); return;
+  }
+  _workSelected.clear();
+  showToast(result.approved + ' approved for scheduled sending' +
+    (result.skipped ? '; ' + result.skipped + ' held back.' : '.'), 'success');
+  loadCustomerWorkspace();
+}
+
+async function loadCustomerWorkspace() {
+  const progress = document.getElementById('work-progress');
+  if (!progress) return;
+  loadWorkspaceTargets();
+  // Never overwrite a message while the customer is typing a correction.
+  if (_workEditing && document.getElementById('work-body')) return;
+  const [session, contacts, outbox, mode, engine] = await Promise.all([
+    api('/api/contact-session'), api('/api/contact-session/contacts'), api('/api/outbox'),
+    api('/api/sending-mode'), api('/api/sellbird/status')]);
+  if (!session || !Array.isArray(contacts) || !outbox || outbox.error) {
+    progress.textContent = 'Could not load daily work. Refresh the dashboard.'; return;
+  }
+  const running = Boolean(session.running);
+  const start = document.getElementById('work-start');
+  if (start) start.disabled = running || Boolean(engine && engine.running) || !_workSearch;
+  progress.innerHTML = (engine && engine.running
+    ? '<p class="muted">Background automation is running. Stop it before starting a focused session. ' +
+      '<button class="btn btn-secondary btn-sm" onclick="stopSellbird().then(loadCustomerWorkspace)">Stop background run</button></p>' : '') +
+    (mode && mode.mode === 'autopilot'
+      ? '<div class="banner wait">Automatic sending is on. Focused-session drafts still wait for review, but other work may send automatically. ' +
+        '<button class="btn btn-secondary btn-sm" onclick="setSendingMode(\'approval\').then(loadCustomerWorkspace)">Switch to review mode</button></div>' : '') +
+    (!engine?.running && (outbox.approved || []).length
+      ? '<div class="banner wait">' + outbox.approved.length + ' approved email(s) are waiting. Sending runs only while Sellbird is running. ' +
+        '<button class="btn btn-secondary btn-sm" onclick="startSellbird().then(loadCustomerWorkspace)">Start scheduled sending and background work</button></div>' : '') +
+    (session.phase ? '<p><b>' + escHtml(session.message || session.phase) + '</b> · ' +
+      Number(session.companies_found || 0) + ' new companies · ' +
+      Number(session.contacts_found || 0) + ' people found · ' +
+      Number(session.verified_contacts || 0) + ' verified · ' +
+      Number(session.drafts_ready || 0) + ' drafts ready</p>' +
+      (_workResumeReason ? '<p class="muted">' + escHtml(_workResumeReason) + '</p>' : '') +
+      (running ? '<button class="btn btn-secondary btn-sm" onclick="workspaceStop()">Stop search</button>' :
+        session.phase === 'paused' && session.settings
+          ? (_workResumeReady
+              ? '<button class="btn btn-primary btn-sm" onclick="workspaceResume()">Continue saved search</button>'
+              : '<button class="btn btn-secondary btn-sm" onclick="workspaceCheckResume()">Check availability</button>')
+          : ['stopped', 'interrupted', 'failed'].includes(session.phase) && session.settings
+            ? '<button class="btn btn-secondary btn-sm" onclick="workspaceResume()">Continue saved search</button>' : '') +
+      (session.discovery_complete ? ' <button class="btn btn-ghost btn-sm" onclick="showLeadDecisions(\'work-decisions\')">Why were results excluded?</button>' : '')
+      : '<p class="muted">No focused session has run yet.</p>');
+
+  const contactEl = document.getElementById('work-contacts');
+  const people = contacts.slice(0, 10);
+  contactEl.innerHTML = people.length ? '<div class="table-card"><table><thead><tr><th>Person</th><th>Company</th><th>Email</th><th>Address status</th><th>Source</th></tr></thead><tbody>' +
+    people.map(p => '<tr><td>' + escHtml([p.first_name, p.last_name].filter(Boolean).join(' ') || 'Name unknown') +
+      '</td><td>' + escHtml(p.company) + '</td><td>' + escHtml(p.email || 'No email found') +
+      '</td><td>' + escHtml(p.email_status || 'Not checked') + '</td><td>' +
+      (safeHref(p.source_url) ? '<a href="' + safeHref(p.source_url) + '" target="_blank" rel="noopener noreferrer">Check source</a>' : 'Source unavailable') +
+      '</td></tr>').join('') + '</tbody></table></div>' : '<p class="muted">No contacts found in this session yet.</p>';
+
+  const drafts = outbox.pending || [];
+  _workSelected = new Set([..._workSelected].filter(id =>
+    drafts.some(d => d.id === id && !heldReason(d))));
+  if (_workDraft >= drafts.length) _workDraft = Math.max(0, drafts.length - 1);
+  const item = drafts[_workDraft];
+  if (_workEditing && (!item || _workEditing !== item.id)) _workEditing = null;
+  const draftEl = document.getElementById('work-drafts');
+  draftEl.innerHTML = item ? '<div class="card"><p class="muted">' + (_workDraft + 1) + ' of ' + drafts.length +
+    ' awaiting review · ' + escHtml(item.to_email) + ' · ' + escHtml(item.context && item.context.email_status || '') + '</p>' +
+    renderDeskContext(item.context) +
+    (heldReason(item) ? '<div class="banner wait">Held for review: ' + escHtml(heldReason(item)) + '</div>' : '') +
+    (_workEditing === item.id
+      ? '<label class="form-label" for="work-subject">Subject</label><input id="work-subject" class="form-input" value="' + escHtml(item.subject) + '">' +
+        '<label class="form-label" for="work-body">Message</label><textarea id="work-body" class="form-input" rows="10">' + escHtml(item.body) + '</textarea>'
+      : '<p><b>Subject:</b> ' + escHtml(item.subject) + '</p><p style="white-space:pre-wrap">' + escHtml(item.body) + '</p>') +
+    (item.context && safeHref(item.context.website) ? '<p><a href="' + safeHref(item.context.website) + '" target="_blank" rel="noopener noreferrer">Check company website</a></p>' : '') +
+    (_workEditing === item.id
+      ? '<div class="btn-group"><button class="btn btn-primary btn-sm" onclick="workspaceSave(' + jsq(item.id) + ')">Save changes</button>' +
+        '<button class="btn btn-secondary btn-sm" onclick="_workEditing=null;loadCustomerWorkspace()">Cancel</button></div>'
+      : '<div class="btn-group"><button class="btn btn-secondary btn-sm" onclick="_workDraft=Math.max(0,_workDraft-1);loadCustomerWorkspace()" ' + (_workDraft ? '' : 'disabled') + '>Previous</button>' +
+        '<button class="btn btn-secondary btn-sm" onclick="_workDraft++;loadCustomerWorkspace()" ' + (_workDraft < drafts.length - 1 ? '' : 'disabled') + '>Next</button>' +
+        '<button class="btn btn-secondary btn-sm" onclick="workspaceEdit(' + jsq(item.id) + ')">Edit</button>' +
+        '<button class="btn btn-secondary btn-sm" onclick="workspaceReview(\'reject\',' + jsq(item.id) + ')">Reject</button>' +
+        '<button class="btn btn-primary btn-sm" onclick="workspaceReview(\'approve\',' + jsq(item.id) + ')">Approve</button></div>' +
+        (!heldReason(item) ? '<label class="muted"><input type="checkbox" ' + (_workSelected.has(item.id) ? 'checked ' : '') +
+          'onchange="workspaceSelect(' + jsq(item.id) + ',this.checked)"> Select after reviewing this draft</label>' : '')) +
+    '</div><div class="btn-group" style="margin-top:8px"><button class="btn btn-secondary btn-sm" onclick="workspaceApproveSelected()">Approve selected (<span id="work-selected-count">' + _workSelected.size + '</span>)</button></div>' :
+    '<p class="muted">No emails awaiting approval. Once a verified contact has a draft, it appears here.</p>';
+}
+
 // ── Live status: the "what's happening?" answer, kept on screen ──
+
+async function loadCustomerResults() {
+  const el = document.getElementById('customer-results');
+  if (!el) return;
+  const [contacts, outbox, replies] = await Promise.all([
+    api('/api/prospects'), api('/api/outbox'), api('/api/reply-queue')]);
+  if (!Array.isArray(contacts) || !outbox || outbox.error || !Array.isArray(replies)) {
+    el.innerHTML = offlineState(); return;
+  }
+  const bounced = contacts.filter(p => p.email_status === 'invalid');
+  const sent = outbox.sent || [];
+  const waiting = outbox.pending || [];
+  const card = (title, number, detail) => '<div class="card"><h3>' + title + '</h3><p style="font-size:24px">' + number + '</p><p class="muted">' + detail + '</p></div>';
+  el.innerHTML = '<div class="form-row">' +
+    card('Contacts', contacts.length, 'Most recent records') +
+    card('Needs approval', waiting.length, 'Review on Work') +
+    card('Recently sent', sent.length, 'Recent Outbox history') +
+    card('Replies needing attention', replies.length, 'Review and respond') +
+    '</div>' +
+    '<div class="subhead">Replies needing attention</div>' +
+    (replies.length ? '<div class="table-card"><table><thead><tr><th>Person</th><th>Company</th><th>Status</th></tr></thead><tbody>' +
+      replies.slice(0, 25).map(p => '<tr><td>' + escHtml([p.first_name, p.last_name].filter(Boolean).join(' ') || p.email) +
+        '</td><td>' + escHtml(p.company) + '</td><td>' + escHtml(p.intent || p.status) + '</td></tr>').join('') +
+      '</tbody></table></div><button class="btn btn-secondary btn-sm" onclick="goTab(\'conversations\')">Open replies</button>' :
+      '<p class="muted">No replies need attention.</p>') +
+    '<div class="subhead">Delivery problems</div>' +
+    (bounced.length ? '<div class="table-card"><table><thead><tr><th>Person</th><th>Company</th><th>Address</th></tr></thead><tbody>' +
+      bounced.slice(0, 25).map(p => '<tr><td>' + escHtml([p.first_name, p.last_name].filter(Boolean).join(' ')) +
+        '</td><td>' + escHtml(p.company) + '</td><td>' + escHtml(p.email) + '</td></tr>').join('') +
+      '</tbody></table></div>' : '<p class="muted">No invalid email addresses in recent contacts.</p>') +
+    '<div class="subhead">Recently sent</div>' +
+    (sent.length ? '<div class="table-card"><table><thead><tr><th>To</th><th>Subject</th><th>Sent</th></tr></thead><tbody>' +
+      sent.slice(0, 25).map(m => '<tr><td>' + escHtml(m.to_email) + '</td><td>' + escHtml(m.subject) +
+        '</td><td>' + escHtml(formatDate(m.sent_at)) + '</td></tr>').join('') + '</tbody></table></div>' :
+      '<p class="muted">No emails sent yet.</p>');
+}
 
 async function loadLiveStatus() {
   const el = document.getElementById('live-status');
@@ -516,10 +847,18 @@ async function loadLiveStatus() {
     ? '<div class="banner bad" style="margin:8px 0 0">' + icon('alert') + '<p style="color:inherit">' +
       (d.stopped || []).map(r => escHtml(jobName(r))).join(', ') + ' stopped before finishing.</p></div>'
     : '';
+  const loop = d.loop_status;
+  const loopHtml = loop && loop.detail
+    ? '<div class="banner ' + (loop.phase === 'interval' ? 'good' : 'wait') +
+      '" style="margin:8px 0 0">' + icon('alert') + '<p style="color:inherit">' +
+      escHtml(loop.detail) + (loop.next_check_at ? ' Next check: ' +
+      escHtml(new Date(loop.next_check_at).toLocaleTimeString()) + '.' : '') + '</p></div>'
+    : '';
   el.innerHTML =
     '<div class="live-head">' + runningHtml +
       '<span class="setup-pct">Cost so far $' + Number(d.cost_usd || 0).toFixed(2) + '</span></div>' +
     stoppedHtml +
+    loopHtml +
     '<div class="steps">' + rows + '</div>' +
     (d.next ? '<div class="live-next">' + icon('arrow') + '<span><b>Next</b> · ' + escHtml(d.next) + '</span>' +
       (d.next_tab ? '<button class="btn btn-secondary btn-sm" onclick="goTab(' + jsq(d.next_tab) + ')">Go</button>' : '') +
@@ -714,11 +1053,13 @@ async function loadSetupStatus() {
 
   el.innerHTML =
     '<div class="card setup-card">' +
-      '<div class="setup-head"><div><h3>Finish setting up Sellbird</h3>' +
-        '<p class="muted">Sellbird starts finding prospects and sending once these are done.</p></div>' +
+      '<div class="setup-head"><div><h3>Next setup step</h3>' +
+        '<p class="muted">Complete this before starting your daily contact search.</p></div>' +
         '<span class="setup-pct">' + done + ' of ' + required.length + ' done</span></div>' +
       '<div class="bar thick" style="margin-bottom:8px"><span style="width:' + pct + '%;background:var(--accent)"></span></div>' +
-      required.map(c => renderCheck(c, false)).join('') +
+      (next ? renderCheck(next, false) : '') +
+      '<details style="margin-top:10px"><summary class="muted" style="font-size:12px">View all setup steps</summary>' +
+      required.filter(c => c !== next).map(c => renderCheck(c, false)).join('') + '</details>' +
       (optional.length
         ? '<details style="margin-top:10px"><summary class="muted" ' +
           'style="font-size:12px">' + optional.length + ' optional</summary>' +
@@ -776,7 +1117,7 @@ async function loadSignals() {
 
   const s = data.summary || {};
   navCount('nav-signals', s.proposed || 0);
-  const parts = [['Confirmed', s.confirmed || 0, 'c-good'], ['Waiting on you', s.proposed || 0, 'c-wait'],
+  const parts = [['In use', s.confirmed || 0, 'c-good'], ['Available to choose', s.proposed || 0, 'c-wait'],
                  ['Turned off', s.rejected || 0, 'c-idle']];
   const all = parts.reduce((x, p) => x + p[1], 0) || 1;
   sumEl.innerHTML = '<div class="card sig-summary"><div class="funnel-bar">' +
@@ -869,6 +1210,22 @@ async function setSignals(codes, status) {
 
 let _provider = null;
 let _discoverPoll = null;
+let _contactSessionPoll = null;
+let _estimatedSearch = false;
+document.addEventListener('input', e => {
+  if (!['disc-cities', 'disc-limit', 'disc-depth', 'disc-cap'].includes(e.target.id)) return;
+  _estimatedSearch = false;
+  const button = document.getElementById('session-start');
+  button.disabled = true;
+  button.textContent = 'Estimate above first';
+});
+document.addEventListener('change', e => {
+  if (e.target.id !== 'disc-preset') return;
+  _estimatedSearch = false;
+  const button = document.getElementById('session-start');
+  button.disabled = true;
+  button.textContent = 'Estimate above first';
+});
 
 async function loadDiscoverProviders() {
   const el = document.getElementById('discover-providers');
@@ -914,13 +1271,17 @@ async function loadDiscoverProviders() {
     showToast(data.running_kind === 'profile' ? 'Finished reading websites.' : 'Discovery finished.', 'success');
   }
   renderDiscoverResult(data.last_report, running);
+  loadContactSession();
 }
 
 function pickProvider(key) {
   _provider = key;
+  _estimatedSearch = false;
   document.getElementById('disc-run').disabled = true;
   document.getElementById('disc-run').textContent = 'Estimate first';
   document.getElementById('discover-estimate').innerHTML = '';
+  document.getElementById('session-start').disabled = true;
+  document.getElementById('session-start').textContent = 'Estimate above first';
   loadDiscoverProviders();
 }
 
@@ -938,6 +1299,7 @@ function discoverBody() {
 }
 
 async function estimateDiscovery() {
+  _estimatedSearch = false;
   const el = document.getElementById('discover-estimate');
   el.innerHTML = '<p class="muted" style="font-size:13px">Pricing it…</p>';
   const data = await api('/api/discover/estimate', {
@@ -947,6 +1309,7 @@ async function estimateDiscovery() {
   if (!data || data.error) {
     el.innerHTML = '<div class="test-result error">' +
       escHtml((data && data.error) || 'Could not estimate.') + '</div>';
+    document.getElementById('session-start').disabled = true;
     return;
   }
 
@@ -969,6 +1332,114 @@ async function estimateDiscovery() {
   btn.disabled = over;
   btn.textContent = over ? 'Over cap'
     : (data.free ? 'Run — free' : 'Run — spend up to $' + data.estimated_cost.toFixed(2));
+  const session = document.getElementById('session-start');
+  _estimatedSearch = !over;
+  session.disabled = over;
+  session.textContent = over ? 'Over cap' : 'Prepare contacts now';
+}
+
+async function startContactSession() {
+  const goal = Number(document.getElementById('session-goal').value);
+  if (!Number.isInteger(goal) || goal < 1 || goal > 10) {
+    showToast('Choose 1 to 10 contacts.', 'error'); return;
+  }
+  const button = document.getElementById('session-start');
+  button.disabled = true;
+  const result = await api('/api/contact-session', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({...discoverBody(), goal}),
+  });
+  if (!result || !result.success) {
+    showToast(failMsg(result, 'Could not start the session.'), 'error');
+    button.disabled = false;
+  }
+  loadContactSession();
+}
+
+async function loadContactSession() {
+  const data = await api('/api/contact-session');
+  const el = document.getElementById('contact-session-status');
+  if (!el || !data || !data.phase) return;
+  const button = document.getElementById('session-start');
+  if (data.running && !_contactSessionPoll)
+    _contactSessionPoll = setInterval(loadContactSession, 4000);
+  else if (!data.running && _contactSessionPoll) {
+    clearInterval(_contactSessionPoll); _contactSessionPoll = null;
+  }
+  button.disabled = Boolean(data.running) || !_estimatedSearch;
+  if (data.running) button.textContent = 'Preparing contacts…';
+  else button.textContent = _estimatedSearch ? 'Prepare contacts now' : 'Estimate above first';
+  el.innerHTML = '<div class="banner ' + (data.phase === 'failed' ? 'bad' : 'wait') +
+    '" style="margin-top:16px">' + icon('alert') + '<div><b>' +
+    escHtml(data.running ? 'Working now' : data.phase === 'done' ? 'Session finished' :
+      data.phase === 'paused' ? 'Session paused' : 'Session stopped') + '</b><p>' +
+    escHtml(data.message || '') + '</p><p>' +
+    Number(data.companies_found || 0) + ' new companies · ' +
+    Number(data.contacts_found || 0) + ' people found · ' +
+    Number(data.verified_contacts || 0) + ' verified contacts · ' +
+    Number(data.drafts_ready || 0) + ' first-email drafts ready</p>' +
+    (data.contacts_found ? '<p class="muted">Excluded: ' +
+      Number(data.missing_email || 0) + ' without email · ' +
+      Number(data.unverified_email || 0) + ' unverified · ' +
+      Number(data.suppressed_email || 0) + ' suppressed</p>' : '') +
+    (data.discovery && data.discovery.discover ? '<p class="muted">Search: ' +
+      Number(data.discovery.discover.found || 0) + ' results · ' +
+      Number(data.discovery.discover.known_companies || 0) + ' already known · ' +
+      Number(data.discovery.discover.excluded || 0) + ' excluded companies · ' +
+      Number(data.discovery.discover.junk || 0) + ' unusable results</p>' : '') +
+    (data.discovery_complete ? '<button class="btn btn-ghost btn-sm" onclick="showLeadDecisions()">Why were leads skipped?</button><div id="lead-decisions"></div>' : '') +
+    (data.started_at ? '<p class="muted">Started ' + relTime(data.started_at) +
+      ' · ' + Number(data.searches || 0) + ' searches' +
+      (data.search_cost_usd ? ' · search cost $' + Number(data.search_cost_usd).toFixed(4) : '') +
+      (data.model_calls == null ? '' : ' · ' + Number(data.model_calls) + ' model calls' +
+        ' · model cost $' + Number(data.model_cost_usd || 0).toFixed(4)) +
+      (data.duration_seconds == null ? '' : ' · ' + Math.ceil(Number(data.duration_seconds) / 60) + ' min') + '</p>' : '') +
+    (data.running ? '<button class="btn btn-danger btn-sm" onclick="stopContactSession()">Stop session</button>' :
+      (data.phase === 'paused' && data.settings ?
+        '<button class="btn btn-primary btn-sm" onclick="goTab(\'today\')">Check availability on Work</button> ' :
+       ['stopped', 'interrupted', 'failed'].includes(data.phase) && data.settings ?
+        '<button class="btn btn-primary btn-sm" onclick="resumeContactSession()">Continue session</button> ' : '') +
+      '<button class="btn btn-secondary btn-sm" onclick="goTab(\'contacts\')">Review contacts</button> ' +
+      '<button class="btn btn-secondary btn-sm" onclick="goTab(\'outbox\')">Review drafts</button>') +
+    '</div></div>';
+  if (_showLeadDecisions && data.discovery_complete) showLeadDecisions();
+}
+
+async function stopContactSession() {
+  const result = await api('/api/contact-session/stop', {method: 'POST'});
+  showToast(result && result.success ? 'Stopping the session.' : failMsg(result, 'Could not stop.'),
+    result && result.success ? 'success' : 'error');
+  loadContactSession();
+}
+
+async function resumeContactSession() {
+  const result = await api('/api/contact-session', {method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify({resume: true})});
+  showToast(result && result.success ? 'Continuing the saved session.' :
+    failMsg(result, 'Could not continue the session.'), result && result.success ? 'success' : 'error');
+  loadContactSession();
+}
+
+let _showLeadDecisions = false;
+async function showLeadDecisions(targetId = 'lead-decisions') {
+  _showLeadDecisions = true;
+  const el = document.getElementById(targetId);
+  if (!el) return;
+  const data = await api('/api/contact-session/decisions');
+  if (!data) { el.textContent = 'Could not load lead decisions.'; return; }
+  const labels = {not_a_business: 'Not a business', do_not_contact: 'Do not contact',
+    no_stable_identity: 'No stable identity', already_known: 'Already known',
+    duplicate_in_search: 'Repeated search result', missing_email: 'No email found',
+    unverified_email: 'Email not verified', suppressed_email: 'Suppressed address'};
+  const rows = (data.companies || []).map(d => ({name: d.company_name || d.domain,
+    reason: d.reason, url: d.source_url, query: d.query})).concat(
+    (data.contacts || []).map(p => ({name: [p.first_name, p.last_name, p.company].filter(Boolean).join(' · '),
+      reason: p.reason, url: p.source_url, query: p.email || ''})));
+  el.innerHTML = rows.length ? '<div class="table-card"><table><thead><tr><th>Lead</th><th>Reason</th><th>Search / email</th><th>Evidence</th></tr></thead><tbody>' +
+    rows.slice(0, 500).map(r => '<tr><td>' + escHtml(r.name || 'Unnamed result') +
+      '</td><td>' + escHtml(labels[r.reason] || r.reason) + '</td><td>' + escHtml(r.query || '') +
+      '</td><td>' + (safeHref(r.url) ? '<a href="' + safeHref(r.url) + '" target="_blank" rel="noopener noreferrer">Source &#8599;</a>' : '—') +
+      '</td></tr>').join('') + '</tbody></table></div>' : '<p class="muted">No skipped leads were recorded for this session.</p>';
 }
 
 async function runDiscovery() {
@@ -1645,6 +2116,8 @@ async function loadOutbox() {
 
   const pending = data.pending || [];
   _desk.items = pending;
+  _desk.selected = new Set([..._desk.selected].filter(id =>
+    pending.some(p => p.id === id && !heldReason(p))));
   _desk.footer = data.footer || '';
   // Keep the desk on the draft being edited even if the list shifted.
   const editingAt = _desk.editing ? pending.findIndex(p => p.id === _desk.editing) : -1;
@@ -1657,6 +2130,9 @@ async function loadOutbox() {
   navCount('nav-outbox', pending.length);
 
   actions.innerHTML =
+    (_desk.selected.size
+      ? '<button id="approve-selected" class="btn btn-primary btn-sm" onclick="outboxApproveSelected()">Approve selected ' +
+        _desk.selected.size + '</button>' : '') +
     (pending.length && !data.paused
       ? (pending.length > pending.filter(p => heldReason(p)).length
         ? '<button class="btn btn-primary btn-sm" onclick="outboxApproveAll()" ' +
@@ -1740,6 +2216,11 @@ function renderDeskContext(ctx) {
     .filter(Boolean).map(escHtml).join(' &middot; ');
   const signals = Object.entries(ctx.signals || {})
     .map(([k, v]) => escHtml(k) + ': <b>' + escHtml(v) + '</b>').join('<br>');
+  const signalSources = (ctx.signal_sources || []).filter(s => safeHref(s.url))
+    .map(s => '<a href="' + safeHref(s.url) + '" target="_blank" rel="noopener noreferrer">' +
+      escHtml(s.label) + ' evidence &#8599;</a>').join(' · ');
+  const source = safeHref(ctx.contact_source_url);
+  const companySource = safeHref(ctx.company_source_url);
   return '<div class="desk-context">' +
     row('Company', escHtml(ctx.company)) +
     row('Website', site) +
@@ -1747,8 +2228,11 @@ function renderDeskContext(ctx) {
     row('Contact', who) +
     row('Found via', escHtml(Object.prototype.hasOwnProperty.call(CONTACT_SOURCES, ctx.contact_source)
       ? CONTACT_SOURCES[ctx.contact_source] : ctx.contact_source)) +
+    row('Evidence', [source ? '<a href="' + source + '" target="_blank" rel="noopener noreferrer">Contact source &#8599;</a>' : '',
+      companySource ? '<a href="' + companySource + '" target="_blank" rel="noopener noreferrer">Company source &#8599;</a>' : ''].filter(Boolean).join(' · ')) +
     row('Email', email) +
     row('Signals', signals) +
+    row('Signal sources', signalSources) +
     row('Campaign', ctx.campaign ? escHtml(ctx.campaign) +
       ' <span class="muted">(how they were found, not a fact about them)</span>' : '') +
     row('Writer notes', escHtml(ctx.notes)) +
@@ -1875,6 +2359,7 @@ function renderDesk(items, i) {
     return '<div class="desk-item ' + (n === i ? 'active' : '') + '" onclick="deskGo(' + n + ')">' +
       '<span class="avatar">' + initials(parts[0], parts[1]) + '</span>' +
       '<div class="di-text"><div class="to">' + escHtml(who) +
+        (_desk.selected.has(it.id) ? ' <span class="tag t-good">Selected</span>' : '') +
         (heldReason(it) ? ' <span class="tag t-bad" title="Sellbird held this instead of sending it">Held</span>' : '') +
         '</div>' +
       '<div class="sub">' + escHtml(it.subject || '(no subject)') + '</div></div>' +
@@ -1905,6 +2390,8 @@ function renderDesk(items, i) {
       '<button class="btn btn-secondary" onclick="deskEdit(null)">Cancel</button>'
     : '<button class="btn btn-primary" onclick="outboxAct(' + jsq(cur.id) + ',\'approve\')">' +
         'Approve <kbd>A</kbd></button>' +
+      (!heldReason(cur) ? '<button class="btn btn-secondary" onclick="deskSelect(' + jsq(cur.id) + ')">' +
+        (_desk.selected.has(cur.id) ? 'Remove from batch' : 'Select for batch') + '</button>' : '') +
       '<button class="btn btn-secondary" onclick="deskEdit(' + jsq(cur.id) + ')">' +
         'Edit <kbd>E</kbd></button>' +
       '<button class="btn btn-secondary" onclick="outboxAct(' + jsq(cur.id) + ',\'reject\')">' +
@@ -1982,6 +2469,25 @@ function deskGo(n) {
   document.getElementById('outbox-desk').innerHTML = renderDesk(_desk.items, n);
 }
 
+function deskSelect(id) {
+  if (deskBusy()) return;
+  const item = _desk.items.find(p => p.id === id);
+  if (!item || heldReason(item)) return;
+  if (_desk.selected.has(id)) _desk.selected.delete(id);
+  else _desk.selected.add(id);
+  document.getElementById('outbox-desk').innerHTML = renderDesk(_desk.items, _desk.i);
+  const old = document.getElementById('approve-selected');
+  if (old) old.remove();
+  if (_desk.selected.size) {
+    const button = document.createElement('button');
+    button.id = 'approve-selected';
+    button.className = 'btn btn-primary btn-sm';
+    button.textContent = 'Approve selected ' + _desk.selected.size;
+    button.onclick = outboxApproveSelected;
+    document.getElementById('outbox-actions').prepend(button);
+  }
+}
+
 // Keyboard review. Ignored while typing into a field, so Settings still works.
 document.addEventListener('keydown', e => {
   if (currentTab !== 'outbox' || e.metaKey || e.ctrlKey || e.altKey) return;
@@ -2019,6 +2525,21 @@ async function outboxApproveAll() {
     ? ' ' + data.held + ' Sellbird held ' + (data.held === 1 ? 'is' : 'are') + ' left for you to read and approve one by one.'
     : ''), 'success');
   else showToast(failMsg(data, 'Approve-all failed.'), 'error');
+  loadOutbox();
+}
+
+async function outboxApproveSelected() {
+  if (deskBusy() || !_desk.selected.size) return;
+  const ids = [..._desk.selected];
+  const data = await api('/api/outbox/approve-selected', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ids}),
+  });
+  if (data && data.success) {
+    showToast('Approved ' + data.approved + ' selected email(s).' +
+      (data.skipped ? ' ' + data.skipped + ' no longer pending; review them individually.' : ''), 'success');
+    _desk.selected.clear();
+  } else showToast(failMsg(data, 'Selected approval failed.'), 'error');
   loadOutbox();
 }
 
@@ -2191,11 +2712,37 @@ function fbCampaign(i) {
 // Search and status filter live outside the table, so the 15-second refresh
 // re-renders rows without losing what you typed.
 let _contactQuery = '', _contactFilter = 'all';
+let _contactEvidenceId = '', _contactEvidence = {};
+async function toggleContactEvidence(id) {
+  _contactEvidenceId = _contactEvidenceId === id ? '' : id;
+  if (_contactEvidenceId && !_contactEvidence[id])
+    _contactEvidence[id] = await api('/api/prospects/' + encodeURIComponent(id) + '/evidence');
+  renderContacts();
+}
+function contactEvidencePanel(data) {
+  if (!data || !data.contact) return '<p class="muted">Evidence could not be loaded.</p>';
+  const p = data.contact, pattern = data.email_pattern;
+  const link = (u, label) => safeHref(u) ? '<a href="' + safeHref(u) +
+    '" target="_blank" rel="noopener noreferrer">' + escHtml(label) + ' &#8599;</a>' : '';
+  return '<div class="desk-context"><b>' + escHtml([p.first_name, p.last_name].filter(Boolean).join(' ')) +
+    ' · ' + escHtml(p.title || 'Role not recorded') + '</b><p>' + escHtml(p.company || '') +
+    ' · ' + escHtml(p.email || 'No email') + ' · ' + escHtml(p.email_status || 'Not verified') + '</p>' +
+    '<p>' + [link(p.source_url, 'Contact source'), link(p.company_source_url, 'Company source'),
+      link(p.website, 'Company website')].filter(Boolean).join(' · ') + '</p>' +
+    (pattern ? '<p>Email domain check: ' + escHtml(pattern.source || 'source unknown') +
+      ' · ' + escHtml(pattern.mx_type || 'MX unknown') +
+      ' · ' + (pattern.is_catch_all === 1 ? 'catch-all' : 'not marked catch-all') + '</p>' : '') +
+    '<p>' + escHtml(p.personalization_notes || '') + '</p>' +
+    (data.signals || []).map(s => '<p>' + escHtml(s.label) + ': ' +
+      escHtml(s.value_text || String(s.value_num ?? '')) + ' ' +
+      link(s.evidence_url, 'Source') + '</p>').join('') + '</div>';
+}
 const CONTACT_FILTERS = [
   ['all', 'All', null],
   ['todo', 'To write', ['new', 'queued']],
   ['contacted', 'Contacted', ['contacted']],
   ['replied', 'Replied', ['replied', 'interested', 'meeting']],
+  ['bounced', 'Invalid email', null],
   ['closed', 'Closed out', null],
 ];
 
@@ -2225,6 +2772,7 @@ async function loadProspects() {
 function contactMatches(p, f) {
   const known = ['new', 'queued', 'contacted', 'replied', 'interested', 'meeting'];
   if (f === 'all') return true;
+  if (f === 'bounced') return p.email_status === 'invalid';
   if (f === 'closed') return !known.includes(p.status);
   const hit = CONTACT_FILTERS.find(x => x[0] === f);
   return !!(hit && hit[2] && hit[2].includes(p.status));
@@ -2263,15 +2811,22 @@ function renderContacts() {
         '</div></td>' +
       '<td>' + (p.score || p.score === 0 ? meterHtml(p.score) : '') + '</td>' +
       '<td>' + badge(p.status) + '</td>' +
-      '<td class="muted">' + sourceLabel(p.source) + '</td>' +
+      '<td class="muted">' + sourceLabel(p.source) +
+        (safeHref(p.source_url) ? ' · <a href="' + safeHref(p.source_url) +
+          '" target="_blank" rel="noopener noreferrer" title="Where this contact was found">Evidence &#8599;</a>' : '') +
+        (p.personalization_notes ? '<div class="cell-sub" title="' + escHtml(p.personalization_notes) + '">' +
+          escHtml(p.personalization_notes.slice(0, 90)) + '</div>' : '') + '</td>' +
       '<td class="muted" style="white-space:nowrap">' + relTime(p.created_at) + '</td>' +
       '<td><div class="cell-row">' + (p.status === 'opted_out' || p.opt_out_undone || _optOut.id === p.id
         ? '<button class="btn btn-ghost btn-sm" onclick="toggleOptOut(' + i + ')" ' +
           'aria-expanded="' + (_optOut.id === p.id) + '" title="What made Sellbird stop emailing them">' +
           (p.status === 'opted_out' ? 'Why?' : 'Opt-out history') + '</button>' : '') +
+        '<button class="btn btn-ghost btn-sm" onclick="toggleContactEvidence(' + jsq(p.id) + ')">Evidence</button>' +
         '<button class="btn btn-ghost btn-sm row-action" onclick="fbProspect(' + i + ')" ' +
         'title="Leave feedback on this contact">Feedback</button></div></td></tr>';
     if (_optOut.id === p.id) html += '<tr class="detail-row"><td colspan="8">' + optOutPanel(p) + '</td></tr>';
+    if (_contactEvidenceId === p.id) html += '<tr class="detail-row"><td colspan="8">' +
+      contactEvidencePanel(_contactEvidence[p.id]) + '</td></tr>';
   }
   rowsEl.innerHTML = html + '</tbody></table></div>' +
     '<div class="table-foot">' + rows.length + ' of ' + _prospects.length + ' contacts</div>';
@@ -2532,13 +3087,15 @@ async function loadCampaigns() {
 
 // The whole exchange in order: Sellbird's cold emails (from the Outbox), the
 // replies, Sellbird's answers, and any answer still waiting for approval.
-let _convos = [], _convoFilter = 'needs';
+let _convos = [], _replyQueue = [], _convoFilter = 'needs';
 const STAGE_LABELS = {
   initial_outreach: 'Outreach', engaged: 'Engaged', qualifying: 'Qualifying', presenting: 'Presenting',
   negotiating: 'Negotiating', closing: 'Closing', closed_won: 'Won', closed_lost: 'Lost',
 };
 const CONVO_FILTERS = [
   ['needs', 'Needs you', c => !!c.draft || c.status === 'needs_human'],
+  ['interested', 'Interested', c => c.intent === 'interested' || c.prospect_status === 'interested' || c.prospect_status === 'meeting'],
+  ['declined', 'Declined / opt-out', c => ['not_interested', 'unsubscribe'].includes(c.intent) || c.prospect_status === 'opted_out'],
   ['open', 'Open', c => c.status !== 'closed' && c.status !== 'awaiting_reply'],
   ['awaiting', 'Awaiting reply', c => c.status === 'awaiting_reply'],
   ['closed', 'Closed', c => c.status === 'closed'],
@@ -2547,9 +3104,11 @@ const CONVO_FILTERS = [
 
 async function loadConversations() {
   const el = document.getElementById('conversations-list');
-  const data = await api('/api/conversations?awaiting=1');
+  const [data, queue] = await Promise.all([
+    api('/api/conversations?awaiting=1'), api('/api/reply-queue')]);
   if (!data) { el.innerHTML = offlineState(); return; }
   _convos = data;
+  _replyQueue = Array.isArray(queue) ? queue : [];
   if (!data.length) {
     el.innerHTML = emptyState(icon('conversations'), 'No conversations yet',
       'No prospects have replied so far. When they do, the Handler agent classifies each reply and responds — every thread shows up here.');
@@ -2566,7 +3125,13 @@ function setConvoFilter(f) { _convoFilter = f; renderConversations(); }
 function renderConversations() {
   const el = document.getElementById('conversations-list');
   const filter = CONVO_FILTERS.find(f => f[0] === _convoFilter) || CONVO_FILTERS[CONVO_FILTERS.length - 1];
-  const bar = '<div class="toolbar"><div class="segmented" role="group" aria-label="Filter conversations">' +
+  const queue = _replyQueue.length ? '<div class="card"><h3>Reply action queue · ' + _replyQueue.length + '</h3>' +
+    _replyQueue.map(c => '<div class="convo-actions"><b>' + escHtml([c.first_name, c.last_name].filter(Boolean).join(' ') || c.email) +
+      '</b> · ' + escHtml(c.company || '') + ' · ' + escHtml(c.intent || c.status) +
+      (c.status === 'needs_human' ? ' · Reply from your inbox, then use the conversation actions below.' :
+        ' <button class="btn btn-secondary btn-sm" onclick="markReplyReviewed(' + jsq(c.id) + ')">Mark reviewed</button>') +
+      '</div>').join('') + '</div>' : '<div class="card"><p class="muted">No replies need your review.</p></div>';
+  const bar = queue + '<div class="toolbar"><div class="segmented" role="group" aria-label="Filter conversations">' +
     CONVO_FILTERS.map(f => '<button class="' + (f[0] === filter[0] ? 'on' : '') + '" aria-pressed="' + (f[0] === filter[0]) +
       '" onclick="setConvoFilter(\'' + f[0] + '\')">' + f[1] + ' <span class="n">' +
       _convos.filter(f[2]).length + '</span></button>').join('') + '</div></div>';
@@ -2580,6 +3145,13 @@ function renderConversations() {
     return;
   }
   el.innerHTML = bar + shown.map(convoCard).join('');
+}
+
+async function markReplyReviewed(id) {
+  const result = await api('/api/reply-queue/' + encodeURIComponent(id) + '/reviewed', {method: 'POST'});
+  showToast(result && result.success ? 'Reply marked reviewed.' : failMsg(result, 'Could not mark reviewed.'),
+    result && result.success ? 'success' : 'error');
+  loadConversations();
 }
 
 function convoCard(c) {
@@ -3092,6 +3664,7 @@ async function loadActivity() {
 
 loadRenameNotice();
 loadToday();
+loadCustomerWorkspace();
 loadTrend();
 loadFunnel();
 loadSetupStatus();
@@ -3125,7 +3698,8 @@ setInterval(async () => {
 setInterval(() => {
   if (document.hidden || _locked) return;
   switch (currentTab) {
-    case 'today': loadToday(); loadTrend(); loadFunnel(); loadRuns(); loadTodayActivity(); break;
+    case 'today': loadToday(); loadCustomerWorkspace(); loadTrend(); loadFunnel(); loadRuns(); loadTodayActivity(); break;
+    case 'results': loadCustomerResults(); break;
     case 'companies': if (!companyDrill) loadCompanies(); break;
     case 'prospects': loadProspects(); break;
     case 'campaigns': loadCampaigns(); break;

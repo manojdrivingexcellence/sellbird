@@ -1809,6 +1809,11 @@ async def run_discovery(
                     report.errors.append(f"{query.keyword()}: {provider.last_error}")
                 report.found += len(found)
                 batch = []
+                decisions = []
+                def discarded(biz, reason):
+                    decisions.append({"name": biz.name, "domain": biz.domain,
+                                      "source_url": biz.source_url, "query": query.keyword(),
+                                      "reason": reason})
                 for biz in found:
                     if query.preset == "hiring" and biz.domain and not is_junk(biz.domain):
                         # Judged on the host as found first: jobs.lever.co
@@ -1816,6 +1821,7 @@ async def run_discovery(
                         biz.domain = company_host(biz.domain)
                     if is_junk(biz.domain, biz.raw_title or biz.name):
                         report.junk += 1
+                        discarded(biz, "not_a_business")
                         continue
                     # Before the upsert, so a forbidden company never becomes a
                     # row and never reaches profiling. Checking it at send time
@@ -1824,9 +1830,11 @@ async def run_discovery(
                     # notices it by eye.
                     if do_not_contact_domain_match(biz.domain, do_not_contact):
                         report.excluded += 1
+                        discarded(biz, "do_not_contact")
                         continue
                     ident = biz.identity()
                     if not ident:
+                        discarded(biz, "no_stable_identity")
                         continue
                     first = ident not in seen
                     if first:
@@ -1836,7 +1844,10 @@ async def run_discovery(
                             report.new_companies += 1
                         else:
                             report.known_companies += 1
+                            discarded(biz, "already_known")
                         company_ids[ident] = company_id
+                    else:
+                        discarded(biz, "duplicate_in_search")
                     company_id = company_ids[ident]
                     phrase = biz.keyword or query.keyword()
                     for code, value in zip(RANK_CODES, _rank_tuple(biz)):
@@ -1887,6 +1898,8 @@ async def run_discovery(
                 if batch:
                     report.observations += await state.add_observations(
                         batch, run_id=report.run_id)
+                if decisions and hasattr(state, "record_lead_decisions"):
+                    await state.record_lead_decisions(report.run_id, decisions)
                 if provider.stop_reason:
                     report.stopped = provider.stop_reason
                     break

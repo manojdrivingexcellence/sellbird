@@ -774,7 +774,7 @@ class WriterConfig(BaseModel):
     # or the Scout's research notes. Anyone without is marked "no_tip" and not
     # written for, instead of getting a draft that says it has no advice. Put
     # them back with `sellbird retry-writes --no-tip`, once more is known.
-    require_tip: bool = False
+    require_tip: bool = True
 
     @field_validator("email_rules", mode="before")
     @classmethod

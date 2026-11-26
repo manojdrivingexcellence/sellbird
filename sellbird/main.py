@@ -1,10 +1,11 @@
 """Sellbird's main heartbeat loop."""
 
 import asyncio
+import json
 import logging
 import signal
 import sys
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, timezone
 
 import pytz
 
@@ -28,6 +29,21 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("sellbird")
+
+LOOP_STATUS_KEY = "heartbeat_status"
+
+
+async def record_loop_status(state, phase: str, detail: str, delay_seconds: int):
+    """Let Today explain a sleeping loop without reading terminal logs."""
+    try:
+        now = datetime.now(timezone.utc)
+        await state.set_setting(LOOP_STATUS_KEY, json.dumps({
+            "phase": phase, "detail": detail,
+            "recorded_at": now.isoformat(),
+            "next_check_at": (now + timedelta(seconds=delay_seconds)).isoformat(),
+        }))
+    except Exception as e:
+        logger.warning("Couldn't record heartbeat status: %s", e)
 
 
 def quiet_http_client_logs():
@@ -324,6 +340,7 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
 
     while not stop_event.is_set():
         try:
+            await record_loop_status(state, "running", "Checking the pipeline now.", 0)
             # 0. Approval or autopilot, as the config file says now: the
             # dashboard can switch it while Sellbird runs.
             await sync_sending_mode(config, state)
@@ -336,6 +353,8 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             if quiet and not send_only:
                 sleep_for = seconds_until_quiet_hours_end(config)
                 logger.info(f"Quiet hours. Sleeping for {sleep_for // 60} minutes.")
+                await record_loop_status(state, "quiet_hours", "Prospecting and writing pause during quiet hours.",
+                                         min(sleep_for, QUIET_HOURS_POLL_SECONDS))
                 # Sleep in short polled chunks rather than one multi-hour
                 # wait: found in production that a system sleep/wake cycle
                 # during a long asyncio.wait_for left the process silently
@@ -375,6 +394,7 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                     f"Sellbird is paused: {problem} Nothing was sent or changed. "
                     f"Re-checking in {config.usage.heartbeat_interval_minutes} minutes."
                 )
+                await record_loop_status(state, "paused", problem, interval)
                 if await _interruptible_sleep(interval, stop_event):
                     break
                 continue
@@ -389,6 +409,7 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
                     f"({config.usage.max_daily_claude_percent}% of quota or "
                     f"{max_calls} calls). Sleeping 1h, then re-checking."
                 )
+                await record_loop_status(state, "usage", getattr(brain, "budget_reason", "") or "Model usage gate reached.", 3600)
                 if await _interruptible_sleep(3600, stop_event):
                     break
                 continue
@@ -481,6 +502,8 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
             logger.info(
                 f"Cycle complete. Sleeping for {config.usage.heartbeat_interval_minutes} minutes."
             )
+            await record_loop_status(state, "interval", f"Last cycle: {action.replace('_', ' ')}. "
+                                     f"Checking again in {config.usage.heartbeat_interval_minutes} minutes.", interval)
             if await _interruptible_sleep(interval, stop_event):
                 break
 

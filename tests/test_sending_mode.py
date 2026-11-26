@@ -94,6 +94,46 @@ async def _row(state, status):
 
 
 @pytest.mark.asyncio
+async def test_selected_approval_skips_held_and_unselected(state):
+    from sellbird.state import HELD_FOR_REVIEW
+    first = await _row(state, "pending_review")
+    second = await _row(state, "pending_review")
+    held = await _row(state, "pending_review")
+    async with state._connect() as db:
+        await db.execute("UPDATE outbox SET error = ? WHERE id = ?",
+                         (HELD_FOR_REVIEW + "external link", held))
+        await db.commit()
+
+    assert await state.approve_selected_outbox([first, held]) == 1
+    assert (await state.get_outbox_item(first))["status"] == "approved"
+    assert (await state.get_outbox_item(second))["status"] == "pending_review"
+    assert (await state.get_outbox_item(held))["status"] == "pending_review"
+    with pytest.raises(ValueError):
+        await state.approve_selected_outbox([first, first])
+
+
+def test_selected_approval_api_needs_valid_ids_and_skips_held(client):
+    from sellbird.state import HELD_FOR_REVIEW
+
+    async def seed():
+        state = StateManager(str(client.db_path))
+        await state.init_db()
+        first = await _row(state, "pending_review")
+        held = await _row(state, "pending_review")
+        async with state._connect() as db:
+            await db.execute("UPDATE outbox SET error = ? WHERE id = ?",
+                             (HELD_FOR_REVIEW + "external link", held))
+            await db.commit()
+        return first, held
+
+    first, held = asyncio.run(seed())
+    assert client.post("/api/outbox/approve-selected", json={"ids": []}).status_code == 400
+    response = client.post("/api/outbox/approve-selected", json={"ids": [first, held]})
+    assert response.status_code == 200
+    assert response.json() == {"success": True, "approved": 1, "skipped": 1}
+
+
+@pytest.mark.asyncio
 async def test_autopilot_rows_are_marked_as_such(state):
     auto = await _row(state, "approved")
     waiting = await _row(state, "pending_review")

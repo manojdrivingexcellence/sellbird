@@ -132,6 +132,8 @@ Every outgoing email waits in the Outbox for your approval until you turn on aut
 
 Details: [Approval and sending](docs/approval-and-sending.md) and [Legal and deliverability](docs/deliverability.md).
 
+Testing the operator-started five-contact flow? See the [daily workflow pilot](docs/daily-workflow-pilot.md) for the dashboard steps, continuation behavior and customer data separation.
+
 ## Upgrading from Harvey
 
 Harvey was renamed Sellbird in 0.4.0. Your configuration, data and dashboard sign-in carry over:

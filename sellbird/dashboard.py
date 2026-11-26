@@ -13,7 +13,7 @@ import sys
 import tempfile
 import uuid
 from collections.abc import Sequence
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import aiosqlite
@@ -34,7 +34,7 @@ from sellbird.paths import PACKAGE_ROOT, PROJECT_ROOT, is_checkout  # noqa: E402
 from sellbird import storage  # noqa: E402
 from sellbird.pidfile import LOCK_FILE, loop_lock_held, pid_alive  # noqa: E402
 from sellbird.textio import read_user_text  # noqa: E402
-from sellbird.workspace_home import NotOnHosted, use_home  # noqa: E402
+from sellbird.workspace_home import NotOnHosted, current_home, use_home  # noqa: E402
 DB_PATH = PROJECT_ROOT / "data" / "sellbird.db"
 ENV_FILE = PROJECT_ROOT / ".env"
 CONFIG_FILE = PROJECT_ROOT / "sellbird.yaml"
@@ -110,10 +110,11 @@ async def query_db(sql: str, params: tuple = ()) -> list[dict]:
     Never raises: a missing DB file, missing table, or malformed schema
     returns [] so no dashboard route can 500 on an empty install.
     """
-    if not DB_PATH.exists():
+    db_path = current_home().db_path
+    if not db_path.exists():
         return []
     try:
-        async with storage.connect(str(DB_PATH)) as db:
+        async with storage.connect(str(db_path)) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(sql, params) as cursor:
                 rows = await cursor.fetchall()
@@ -1198,9 +1199,34 @@ async def get_prospects():
     return rows
 
 
+@app.get("/api/prospects/{prospect_id}/evidence")
+async def prospect_evidence(prospect_id: str):
+    """Reviewable sources and verification facts for one contact."""
+    rows = await query_db(
+        "SELECT p.id, p.first_name, p.last_name, p.title, p.email, p.email_status, "
+        "p.source, p.source_url, p.personalization_notes, p.score, "
+        "c.name AS company, c.website, c.source_url AS company_source_url, "
+        "c.description, c.domain FROM prospects p LEFT JOIN companies c ON c.id = p.company_id "
+        "WHERE p.id = ?", (prospect_id,))
+    if not rows:
+        return JSONResponse({"error": "Contact not found."}, status_code=404)
+    person = rows[0]
+    pattern = await query_db(
+        "SELECT pattern, source, confidence, mx_type, is_catch_all, updated_at "
+        "FROM email_patterns WHERE domain = ?", ((person.get("email") or "").rsplit("@", 1)[-1].lower(),))
+    observations = await query_db(
+        "SELECT o.signal_code, COALESCE(NULLIF(sc.label, ''), o.signal_code) AS label, "
+        "o.value_text, o.value_num, o.evidence_url, o.observed_at "
+        "FROM observations o LEFT JOIN signal_codes sc ON sc.code = o.signal_code "
+        "JOIN prospects p ON p.company_id = o.company_id WHERE p.id = ? "
+        "AND o.evidence_url != '' ORDER BY o.observed_at DESC LIMIT 20", (prospect_id,))
+    return {"contact": person, "email_pattern": pattern[0] if pattern else None,
+            "signals": observations}
+
+
 def _state():
     from sellbird.state import StateManager
-    return StateManager(db_path=str(DB_PATH))
+    return StateManager(db_path=str(current_home().db_path))
 
 
 # What a reviewer needs next to a draft to check its claims against the facts.
@@ -1222,8 +1248,8 @@ async def _with_context(items: list[dict]) -> list[dict]:
 
     people = {r["id"]: r for r in (await query_db(
         "SELECT p.id, p.first_name, p.last_name, p.title, p.source, p.email_status, "
-        "p.score, p.personalization_notes, p.company_id, c.name AS company_name, "
-        "c.domain, c.website, c.description, c.industry AS found_by "
+        "p.score, p.personalization_notes, p.source_url, p.company_id, c.name AS company_name, "
+        "c.domain, c.website, c.description, c.industry AS found_by, c.source_url AS company_source_url "
         "FROM prospects p LEFT JOIN companies c ON c.id = p.company_id "
         f"WHERE p.id IN ({_in(pids)})", tuple(pids)) if pids else [])}
     campaigns = {r["id"]: r["name"] for r in (await query_db(
@@ -1232,10 +1258,11 @@ async def _with_context(items: list[dict]) -> list[dict]:
 
     company_ids = sorted({p["company_id"] for p in people.values() if p.get("company_id")})
     signals: dict[str, dict[str, str]] = {}
+    signal_sources: dict[str, list[dict]] = {}
     if company_ids:
         rows = await query_db(
             "SELECT o.company_id, o.signal_code, o.value_num, o.value_text, "
-            "o.observed_at, o.run_id, "
+            "o.observed_at, o.run_id, o.evidence_url, "
             "COALESCE(NULLIF(sc.label, ''), o.signal_code) AS label FROM observations o "
             "LEFT JOIN signal_codes sc ON sc.code = o.signal_code "
             f"WHERE o.company_id IN ({_in(company_ids)}) "
@@ -1248,6 +1275,11 @@ async def _with_context(items: list[dict]) -> list[dict]:
         # value from the latest sighting shows, not just one of them.
         latest: dict[tuple, tuple] = {}
         for r in rows:
+            if r.get("evidence_url"):
+                source = {"label": r["label"], "url": r["evidence_url"]}
+                links = signal_sources.setdefault(r["company_id"], [])
+                if source not in links:
+                    links.append(source)
             if r["value_text"]:
                 value = r["value_text"]
             elif r["value_num"] is None:
@@ -1276,10 +1308,13 @@ async def _with_context(items: list[dict]) -> list[dict]:
             "contact": " ".join(x for x in (p.get("first_name"), p.get("last_name")) if x),
             "contact_title": p.get("title", ""),
             "contact_source": p.get("source", ""),
+            "contact_source_url": p.get("source_url", ""),
+            "company_source_url": p.get("company_source_url", ""),
             "email_status": p.get("email_status", ""),
             "score": p.get("score"),
             "notes": p.get("personalization_notes", ""),
             "signals": signals.get(p.get("company_id"), {}),
+            "signal_sources": signal_sources.get(p.get("company_id"), [])[:10],
         }
     return items
 
@@ -1373,6 +1408,25 @@ async def outbox_approve_all():
         n = await state.approve_outbox()
         # Held ones (possible planted link or leak) are approved one by one.
         return {"success": True, "approved": n, "held": await state.count_held_for_review()}
+    except Exception as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+
+
+@app.post("/api/outbox/approve-selected")
+async def outbox_approve_selected(request: Request):
+    """Approve selected reviewed drafts, excluding any held for individual review."""
+    try:
+        body = await request.json()
+        ids = body.get("ids") if isinstance(body, dict) else None
+        if (not isinstance(ids, list) or not ids or len(ids) > 100
+                or any(not isinstance(i, str) or not i for i in ids)):
+            return JSONResponse({"success": False, "message": "Select 1 to 100 drafts."}, status_code=400)
+        state = _state()
+        await state.init_db()
+        count = await state.approve_selected_outbox(ids)
+        return {"success": True, "approved": count, "skipped": len(ids) - count}
+    except ValueError as e:
+        return JSONResponse({"success": False, "message": str(e)}, status_code=400)
     except Exception as e:
         return JSONResponse({"success": False, "message": str(e)}, status_code=500)
 
@@ -1869,6 +1923,42 @@ async def get_conversations(awaiting: bool = False):
     return rows
 
 
+@app.get("/api/reply-queue")
+async def reply_queue():
+    """Replies needing a human decision, without changing conversation status."""
+    return await query_db(
+        "SELECT c.id, c.prospect_id, c.intent, c.status, c.updated_at, "
+        "p.first_name, p.last_name, p.company, p.email, p.status AS prospect_status "
+        "FROM conversations c JOIN prospects p ON p.id = c.prospect_id "
+        "LEFT JOIN reply_reviews r ON r.conversation_id = c.id "
+        "WHERE c.status = 'needs_human' OR ("
+        "(c.intent IN ('interested', 'not_interested', 'unsubscribe') "
+        "OR p.status IN ('interested', 'meeting', 'opted_out')) "
+        "AND (r.reviewed_at IS NULL OR c.updated_at != r.conversation_updated_at)) "
+        "ORDER BY CASE WHEN c.status = 'needs_human' THEN 0 "
+        "WHEN c.intent = 'interested' THEN 1 ELSE 2 END, c.updated_at DESC LIMIT 100")
+
+
+@app.post("/api/reply-queue/{convo_id}/reviewed")
+async def mark_reply_reviewed(convo_id: str):
+    rows = await query_db("SELECT id, status, updated_at FROM conversations WHERE id = ?", (convo_id,))
+    if not rows:
+        return JSONResponse({"success": False, "message": "No such conversation."}, status_code=404)
+    if rows[0]["status"] == "needs_human":
+        return JSONResponse({"success": False, "message": "Handle this conversation before clearing it."}, status_code=409)
+    state = _state()
+    await state.init_db()
+    async with state._connect() as db:
+        await db.execute(
+            "INSERT INTO reply_reviews (conversation_id, reviewed_at, conversation_updated_at) "
+            "VALUES (?, CURRENT_TIMESTAMP, ?) ON CONFLICT(conversation_id) DO UPDATE SET "
+            "reviewed_at = CURRENT_TIMESTAMP, conversation_updated_at = excluded.conversation_updated_at",
+            (convo_id, rows[0]["updated_at"]))
+        await db.commit()
+    await state.log_action("reply_reviewed", "dashboard", {"conversation_id": convo_id})
+    return {"success": True}
+
+
 async def _awaiting_reply() -> list[dict]:
     """Prospects Sellbird emailed who haven't replied yet, shaped like a
     conversation so the tab can show every sent email, not only the ones
@@ -1980,6 +2070,32 @@ async def get_activity():
 _discovery_task: asyncio.Task | None = None
 _discovery_report: dict | None = None
 _discovery_kind = "discover"   # or "profile": reading sites has no stop switch
+_contact_session_task: asyncio.Task | None = None
+_contact_session_report: dict | None = None
+
+
+def _session_target_config(body: dict, config):
+    """Apply customer choices to this run without changing saved targeting."""
+    import copy
+
+    overrides = {}
+    for field, maximum in (("industries", 5), ("titles", 10)):
+        if field not in body:
+            continue
+        values = body[field]
+        if (not isinstance(values, list) or not values or len(values) > maximum
+                or any(not isinstance(v, str) or not v.strip() or len(v) > 100
+                       for v in values)):
+            raise ValueError(f"Choose 1–{maximum} {field}, each under 100 characters.")
+        overrides[field] = list(dict.fromkeys(v.strip() for v in values))
+    if not overrides:
+        return config
+    if not hasattr(config, "icp"):
+        raise ValueError("Target industries and titles are not configured.")
+    targeted = config.model_copy(deep=True) if hasattr(config, "model_copy") else copy.deepcopy(config)
+    for field, values in overrides.items():
+        setattr(targeted.icp, field, values)
+    return targeted
 
 
 def _discovery_queries(body: dict, config):
@@ -2036,7 +2152,7 @@ async def estimate_discovery(request: Request):
                                 status_code=400)
 
         try:
-            queries = _discovery_queries(body, load_config())
+            queries = _discovery_queries(body, _session_target_config(body, load_config()))
         except ValueError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
         return {
@@ -2048,6 +2164,265 @@ async def estimate_discovery(request: Request):
         }
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/contact-session")
+async def contact_session_status():
+    """Progress for the operator-started contact and draft session."""
+    from sellbird.workspace_home import require_self_hosted
+    require_self_hosted("local_discovery")
+    report = _contact_session_report
+    if report is None:
+        state = _state()
+        await state.init_db()
+        try:
+            report = json.loads(await state.get_setting("focused_session_report") or "{}")
+        except (ValueError, TypeError):
+            report = {}
+        if report.get("phase") not in ("done", "paused", "failed", "stopped", "interrupted", None):
+            report.update(phase="interrupted", message="Dashboard restarted during this session. Saved contacts and drafts remain available; choose Continue session to pick up the saved work.")
+            await state.set_setting("focused_session_report", json.dumps(report))
+            if report.get("session_id"):
+                await state.save_focused_session(report)
+    public_report = {k: v for k, v in (report or {}).items() if k not in (
+        "baseline_people", "baseline_campaigns", "selected_ids", "usage_start_calls",
+        "usage_start_cost_usd", "segment_started_at")}
+    return {**public_report,
+            "running": bool(_contact_session_task and not _contact_session_task.done())}
+
+
+@app.get("/api/contact-session/resume-check")
+async def contact_session_resume_check():
+    """Check the real subscription ceiling without starting a session."""
+    from sellbird.workspace_home import require_self_hosted
+    from sellbird.config import load_config
+    from sellbird.brain import Brain
+    require_self_hosted("local_discovery")
+    state = _state()
+    await state.init_db()
+    config = load_config()
+    brain = Brain(state, config.brain)
+    problem = await brain.preflight()
+    if problem:
+        return {"can_resume": False, "reason": str(problem),
+                "ceiling": config.usage.max_daily_claude_percent}
+    percent = config.usage.max_daily_claude_percent
+    allowed = await brain.is_within_budget(max(int(200 * percent / 100), 1), percent)
+    return {"can_resume": allowed, "reason": "" if allowed else brain.budget_reason,
+            "ceiling": percent}
+
+
+@app.get("/api/contact-session/decisions")
+async def contact_session_decisions():
+    """Individual search exclusions and unusable new contacts from this run."""
+    from sellbird.workspace_home import require_self_hosted
+    require_self_hosted("local_discovery")
+    state = _state()
+    await state.init_db()
+    try:
+        report = _contact_session_report or json.loads(
+            await state.get_setting("focused_session_report") or "{}")
+    except (ValueError, TypeError):
+        report = {}
+    run_id = ((report.get("discovery") or {}).get("discover") or {}).get("run_id", "")
+    rejected = await state.lead_decisions(run_id) if run_id else []
+    baseline = set(report.get("baseline_people") or [])
+    if not baseline and not report.get("discovery_complete"):
+        return {"companies": rejected, "contacts": []}
+    rows = await query_db("SELECT id, first_name, last_name, company, email, email_status, "
+                          "source_url FROM prospects ORDER BY created_at DESC LIMIT 2000")
+    contacts = []
+    for p in rows:
+        if p["id"] in baseline:
+            continue
+        reason = ("missing_email" if not p["email"] else
+                  "unverified_email" if p["email_status"] != "verified" else
+                  "suppressed_email" if await state.is_suppressed(p["email"]) else "")
+        if reason:
+            contacts.append({**p, "reason": reason})
+    return {"companies": rejected, "contacts": contacts[:500]}
+
+
+@app.get("/api/contact-session/contacts")
+async def contact_session_contacts():
+    """Only people newly found in the latest focused session, newest first."""
+    from sellbird.workspace_home import require_self_hosted
+    require_self_hosted("local_discovery")
+    state = _state()
+    await state.init_db()
+    try:
+        report = _contact_session_report or json.loads(
+            await state.get_setting("focused_session_report") or "{}")
+    except (ValueError, TypeError):
+        report = {}
+    if not report.get("session_id") or "baseline_people" not in report:
+        return []
+    baseline = set(report.get("baseline_people") or [])
+    rows = await query_db(
+        "SELECT p.id, p.first_name, p.last_name, p.company, p.title, p.email, "
+        "p.email_status, p.status, p.source, p.source_url, p.personalization_notes, "
+        "p.created_at FROM prospects p ORDER BY p.created_at DESC LIMIT 2000")
+    return [p for p in rows if p["id"] not in baseline][:100]
+
+
+@app.get("/api/daily-summary")
+async def daily_summary(tz: int = 0):
+    """Operator-started sessions on the viewer's local day, including pauses."""
+    offset = timezone(timedelta(minutes=max(-840, min(840, tz))))
+    today = datetime.now(offset).date()
+    state = _state()
+    await state.init_db()
+    sessions = []
+    for report in await state.recent_focused_sessions():
+        try:
+            started = datetime.fromisoformat(report["started_at"])
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            if started.astimezone(offset).date() == today:
+                sessions.append(report)
+        except (KeyError, TypeError, ValueError):
+            continue
+    fields = ("companies_found", "contacts_found", "verified_contacts", "drafts_ready",
+              "missing_email", "unverified_email", "suppressed_email", "model_calls",
+              "search_cost_usd", "model_cost_usd", "duration_seconds")
+    totals = {field: round(sum(float(s.get(field) or 0) for s in sessions), 4)
+              for field in fields}
+    return {"date": today.isoformat(), "sessions": len(sessions), "totals": totals,
+            "latest": [{"phase": s.get("phase"), "message": s.get("message"),
+                        "started_at": s.get("started_at"), "goal": s.get("goal")}
+                       for s in sessions[:5]]}
+
+
+@app.post("/api/contact-session/stop")
+async def stop_contact_session():
+    """Stop the focused pass; already saved contacts and drafts remain visible."""
+    from sellbird.workspace_home import require_self_hosted
+    require_self_hosted("local_discovery")
+    if not _contact_session_task or _contact_session_task.done():
+        return {"success": False, "message": "No focused session is running."}
+    state = _state()
+    await state.init_db()
+    await state.set_setting("discovery_paused", "stopped from dashboard")
+    _contact_session_task.cancel()
+    return {"success": True}
+
+
+@app.post("/api/contact-session")
+async def start_contact_session(request: Request):
+    """Run discovery, contact verification and drafting now, without sending."""
+    from sellbird.workspace_home import require_self_hosted
+    require_self_hosted("local_discovery")
+    global _contact_session_task, _contact_session_report
+    if (_contact_session_task and not _contact_session_task.done()
+            or _discovery_task and not _discovery_task.done()):
+        return JSONResponse({"success": False, "message": "Another discovery or contact session is running."},
+                            status_code=409)
+    if _check_sellbird_pid():
+        return JSONResponse({"success": False, "message":
+                             "Stop the background loop in Controls before starting a focused session. "
+                             "You can start it again afterward."}, status_code=409)
+    try:
+        from sellbird.collectors.discover import PROVIDERS, estimate_cost
+        from sellbird.config import load_config
+        from sellbird.contact_session import prepare_contacts
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("Expected session settings.")
+        resume = body.get("resume") is True
+        state = _state()
+        await state.init_db()
+        previous = {}
+        if resume:
+            try:
+                previous = json.loads(await state.get_setting("focused_session_report") or "{}")
+            except (ValueError, TypeError):
+                previous = {}
+            if previous.get("phase") not in ("paused", "stopped", "interrupted", "failed") or not previous.get("settings"):
+                raise ValueError("No paused session is available to continue.")
+            body = previous["settings"]
+        goal = body.get("goal", 5)
+        if type(goal) is not int or not 1 <= goal <= 10:
+            raise ValueError("Choose a goal from 1 to 10 contacts.")
+        provider = body.get("provider") or ""
+        if provider not in PROVIDERS:
+            raise ValueError("Choose a discovery source first.")
+        config = _session_target_config(body, load_config())
+        if config.channels.email.provider not in ("gmail", "microsoft", "smtp"):
+            raise ValueError("Focused Outbox review needs Gmail, Microsoft 365 or SMTP.")
+        if resume and hasattr(config, "brain") and hasattr(config, "usage"):
+            from sellbird.brain import Brain
+            brain = Brain(state, config.brain)
+            percent = config.usage.max_daily_claude_percent
+            if not await brain.is_within_budget(max(int(200 * percent / 100), 1), percent):
+                return JSONResponse({"success": False,
+                                     "message": brain.budget_reason +
+                                     " Wait for usage to fall below the ceiling, then check again."},
+                                    status_code=409)
+        queries = _discovery_queries(body, config)
+        if len(queries) > 12 or any(q.limit > 30 or q.limit < 1 for q in queries):
+            raise ValueError("For a focused session, use at most 12 searches and 1–30 results per query.")
+        max_spend = float(body.get("max_spend") or 1.0)
+        if not 0 < max_spend <= 50:  # rejects NaN as well
+            raise ValueError("Choose a spend cap between $0 and $50.")
+        if estimate_cost(provider, queries) > max_spend:
+            raise ValueError("Search estimate is over your spend cap. Narrow the search first.")
+        await state.set_setting("discovery_paused", "")
+        usage_before = (await state.usage_totals())["today"]
+        report = {**(previous if resume else {}), "phase": "starting", "goal": goal,
+                  "session_id": previous.get("session_id") if resume and previous.get("session_id") else uuid.uuid4().hex,
+                  "verified_contacts": previous.get("verified_contacts", 0) if resume else 0,
+                  "drafts_ready": previous.get("drafts_ready", 0) if resume else 0,
+                  "companies_found": previous.get("companies_found", 0) if resume else 0,
+                  "message": "Continuing your session." if resume else "Starting your session.",
+                  "provider": provider, "started_at": (previous.get("started_at") if resume else None) or datetime.now(timezone.utc).isoformat(),
+                  "segment_started_at": datetime.now(timezone.utc).isoformat(),
+                  "settings": {k: body.get(k) for k in ("provider", "goal", "cities", "industries", "titles", "depth", "limit", "preset", "max_spend")},
+                  "usage_start_calls": int(usage_before.get("calls") or 0),
+                  "usage_start_cost_usd": float(usage_before.get("cost_usd") or 0),
+                  "searches": len(queries), "estimated_search_cost_usd": round(estimate_cost(provider, queries), 4)}
+        _contact_session_report = report
+        await state.set_setting("focused_session_report", json.dumps(report))
+        await state.save_focused_session(report)
+
+        async def _checkpoint():
+            while True:
+                await asyncio.sleep(2)
+                await state.set_setting("focused_session_report", json.dumps(report))
+                await state.save_focused_session(report)
+
+        async def _go():
+            checkpoint = asyncio.create_task(_checkpoint())
+            try:
+                if resume:
+                    await prepare_contacts(state, config, provider, queries, max_spend, goal, report, resume=True)
+                else:
+                    await prepare_contacts(state, config, provider, queries, max_spend, goal, report)
+            except asyncio.CancelledError:
+                report.update(phase="stopped", message="Stopped. Contacts and drafts already saved remain available.")
+                raise
+            except Exception as exc:
+                logger.exception("contact session failed")
+                report.update(phase="failed", message=str(exc)[:400])
+            finally:
+                checkpoint.cancel()
+                report["ended_at"] = datetime.now(timezone.utc).isoformat()
+                report["duration_seconds"] = int(previous.get("duration_seconds") or 0) + max(0, round(
+                    (datetime.fromisoformat(report["ended_at"]) -
+                     datetime.fromisoformat(report["segment_started_at"])).total_seconds()))
+                usage_after = (await state.usage_totals())["today"]
+                report["model_calls"] = int(previous.get("model_calls") or 0) + max(0, int(usage_after.get("calls") or 0) - report["usage_start_calls"])
+                report["model_cost_usd"] = round(float(previous.get("model_cost_usd") or 0) + max(0,
+                    float(usage_after.get("cost_usd") or 0) - report["usage_start_cost_usd"]), 4)
+                await state.set_setting("focused_session_report", json.dumps(report))
+                await state.save_focused_session(report)
+
+        _contact_session_task = asyncio.create_task(_go())
+        return {"success": True, "goal": goal}
+    except (ValueError, TypeError) as exc:
+        return JSONResponse({"success": False, "message": str(exc)}, status_code=400)
+    except Exception as exc:
+        logger.exception("contact session start failed")
+        return JSONResponse({"success": False, "message": str(exc)}, status_code=500)
 
 
 @app.post("/api/discover/run")
@@ -2220,6 +2595,19 @@ async def get_live_status():
     read), so a finished step always reaches 100% instead of sticking.
     """
     now = datetime.now(timezone.utc).replace(tzinfo=None)  # DB stores naive UTC
+    from sellbird.main import LOOP_STATUS_KEY
+    loop_status = None
+    if _check_sellbird_pid():
+        try:
+            rows = await query_db("SELECT value FROM settings WHERE key = ?", (LOOP_STATUS_KEY,))
+            recorded = json.loads(rows[0]["value"]) if rows else {}
+            seen = datetime.fromisoformat(recorded.get("recorded_at", ""))
+            # A crashed or replaced loop must not leave yesterday's pause on screen.
+            if (0 <= (datetime.now(timezone.utc) - seen).total_seconds() < 7200
+                    and recorded.get("phase") in ("running", "interval", "quiet_hours", "paused", "usage")):
+                loop_status = recorded
+        except (ValueError, TypeError, KeyError):
+            pass
     has_site = "COALESCE(domain, '') != ''"
     companies = await _scalar("SELECT COUNT(*) FROM companies")
     with_site = await _scalar(f"SELECT COUNT(*) FROM companies WHERE {has_site}")
@@ -2343,6 +2731,8 @@ async def get_live_status():
         next_up, next_tab = "A job stopped before finishing. Run it again.", "discover"
     elif sellbird_sends and awaiting_review:
         next_up, next_tab = f"Review the {awaiting_review} draft(s) waiting in the Outbox.", "outbox"
+    elif loop_status and loop_status["phase"] in ("usage", "paused", "quiet_hours"):
+        next_up, next_tab = loop_status["detail"], "usage" if loop_status["phase"] == "usage" else "controls"
     elif by_hand:
         next_up, next_tab = f"Open Campaigns and send the {len(by_hand)} unsent email(s).", "campaigns"
     elif profiled > checked:
@@ -2358,6 +2748,7 @@ async def get_live_status():
         "steps": steps,
         "running": [dict(r, eta_text=_eta_text(r["eta_min"])) for r in running],
         "stopped": stopped,
+        "loop_status": loop_status,
         "next": next_up,
         "next_tab": next_tab,
         "cost_usd": round(cost, 4),
@@ -2496,12 +2887,10 @@ async def get_today():
         if proposed:
             items.append({
                 "key": "signals", "tone": "warn",
-                "title": (f"{len(proposed)} signal waiting for your confirmation"
-                          if len(proposed) == 1
-                          else f"{len(proposed)} signals waiting for your confirmation"),
-                "detail": ("Sellbird won't collect anything you haven't approved. "
-                           "Confirm which signals define a good prospect for you."),
-                "action": "Review signals", "tab": "signals",
+                "title": f"{len(proposed)} optional search rules to review",
+                "detail": ("These are possible clues about a business, not contacts or emails. "
+                           "Turn on only the rules relevant to your ideal customer."),
+                "action": "Choose rules", "tab": "signals",
             })
         elif not confirmed:
             items.append({
