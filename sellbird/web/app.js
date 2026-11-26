@@ -408,12 +408,22 @@ function showTab(id, btn) {
   document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
   document.getElementById(id).classList.add('active');
   if (btn) btn.classList.add('active');
+  else {
+    const nav = [...document.querySelectorAll('nav button')].find(b =>
+      b.getAttribute('onclick') === "showTab('" + id + "', this)");
+    if (nav) {
+      nav.classList.add('active');
+      const advanced = nav.closest('.nav-advanced');
+      if (advanced) advanced.open = true;
+    }
+  }
   loadCurrentTab();
 }
 
 function loadCurrentTab() {
   switch (currentTab) {
     case 'today': loadLiveStatus(); loadRenameNotice(); loadToday(); loadCustomerWorkspace(); loadTrend(); loadFunnel(); loadSetupStatus(); loadRuns(); loadTodayActivity(); break;
+    case 'results': loadCustomerResults(); break;
     case 'signals': loadSignals(); break;
     case 'discover': loadDiscoverProviders(); break;
     case 'companies': if (!companyDrill) loadCompanies(); break;
@@ -443,7 +453,9 @@ async function loadToday() {
     return;
   }
 
-  navCount('nav-today', (data.items || []).filter(i => i.tone !== 'good').length);
+  const visibleItems = (data.items || []).filter(i =>
+    i.key !== 'signals' || !(data.stats || {}).signals_confirmed);
+  navCount('nav-today', visibleItems.filter(i => i.tone !== 'good').length);
   navCount('nav-outbox', (data.stats || {}).outbox_pending || 0);
   navCount('nav-signals', (data.stats || {}).signals_proposed || 0);
   navCount('nav-conversations', (data.stats || {}).needs_human || 0);
@@ -451,7 +463,7 @@ async function loadToday() {
   renderFigures(_todayStats);
   loadDailySummary();
 
-  const items = data.items || [];
+  const items = visibleItems;
   if (!items.length) {
     el.innerHTML = '<div class="queue-clear">' +
       '<div class="queue-icon">' + icon('check') + '</div><div>' +
@@ -504,6 +516,8 @@ let _workSearch = null;
 let _workBusy = false;
 let _workProvider = null;
 let _workDraft = 0;
+let _workEditing = null;
+let _workSelected = new Set();
 document.addEventListener('input', e => {
   if (e.target.id === 'work-city' || e.target.id === 'work-goal') workspaceResetEstimate();
 });
@@ -595,9 +609,55 @@ async function workspaceReview(action, id) {
   if (result && result.success) loadCustomerWorkspace();
 }
 
+function workspaceEdit(id) {
+  _workEditing = id;
+  loadCustomerWorkspace();
+}
+
+async function workspaceSave(id) {
+  const subject = document.getElementById('work-subject').value.trim();
+  const body = document.getElementById('work-body').value.trim();
+  if (!subject || !body) { showToast('Subject and message are required.', 'error'); return; }
+  if (_workBusy) return;
+  _workBusy = true;
+  const result = await api('/api/outbox/' + encodeURIComponent(id) + '/edit', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({subject, body})});
+  _workBusy = false;
+  if (!result || !result.success) {
+    showToast(failMsg(result, 'Could not save the draft.'), 'error'); return;
+  }
+  _workEditing = null;
+  showToast('Saved. The email still needs approval.', 'success');
+  loadCustomerWorkspace();
+}
+
+function workspaceSelect(id, selected) {
+  if (selected) _workSelected.add(id); else _workSelected.delete(id);
+  const count = document.getElementById('work-selected-count');
+  if (count) count.textContent = String(_workSelected.size);
+}
+
+async function workspaceApproveSelected() {
+  if (!_workSelected.size || _workBusy) return;
+  _workBusy = true;
+  const result = await api('/api/outbox/approve-selected', {method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ids: [..._workSelected]})});
+  _workBusy = false;
+  if (!result || !result.success) {
+    showToast(failMsg(result, 'Could not approve selected emails.'), 'error'); return;
+  }
+  _workSelected.clear();
+  showToast(result.approved + ' approved for scheduled sending' +
+    (result.skipped ? '; ' + result.skipped + ' held back.' : '.'), 'success');
+  loadCustomerWorkspace();
+}
+
 async function loadCustomerWorkspace() {
   const progress = document.getElementById('work-progress');
   if (!progress) return;
+  // Never overwrite a message while the customer is typing a correction.
+  if (_workEditing && document.getElementById('work-body')) return;
   const [session, contacts, outbox, mode, engine] = await Promise.all([
     api('/api/contact-session'), api('/api/prospects'), api('/api/outbox'),
     api('/api/sending-mode'), api('/api/sellbird/status')]);
@@ -613,6 +673,9 @@ async function loadCustomerWorkspace() {
     (mode && mode.mode === 'autopilot'
       ? '<div class="banner wait">Automatic sending is on. Focused-session drafts still wait for review, but other work may send automatically. ' +
         '<button class="btn btn-secondary btn-sm" onclick="setSendingMode(\'approval\').then(loadCustomerWorkspace)">Switch to review mode</button></div>' : '') +
+    (!engine?.running && (outbox.approved || []).length
+      ? '<div class="banner wait">' + outbox.approved.length + ' approved email(s) are waiting. Sending runs only while Sellbird is running. ' +
+        '<button class="btn btn-secondary btn-sm" onclick="startSellbird().then(loadCustomerWorkspace)">Start scheduled sending and background work</button></div>' : '') +
     (session.phase ? '<p><b>' + escHtml(session.message || session.phase) + '</b> · ' +
       Number(session.contacts_found || 0) + ' people found · ' +
       Number(session.verified_contacts || 0) + ' verified · ' +
@@ -633,24 +696,72 @@ async function loadCustomerWorkspace() {
       '</td></tr>').join('') + '</tbody></table></div>' : '<p class="muted">No contacts found yet.</p>';
 
   const drafts = outbox.pending || [];
+  _workSelected = new Set([..._workSelected].filter(id =>
+    drafts.some(d => d.id === id && !heldReason(d))));
   if (_workDraft >= drafts.length) _workDraft = Math.max(0, drafts.length - 1);
   const item = drafts[_workDraft];
+  if (_workEditing && (!item || _workEditing !== item.id)) _workEditing = null;
   const draftEl = document.getElementById('work-drafts');
   draftEl.innerHTML = item ? '<div class="card"><p class="muted">' + (_workDraft + 1) + ' of ' + drafts.length +
     ' awaiting review · ' + escHtml(item.to_email) + ' · ' + escHtml(item.context && item.context.email_status || '') + '</p>' +
     renderDeskContext(item.context) +
     (heldReason(item) ? '<div class="banner wait">Held for review: ' + escHtml(heldReason(item)) + '</div>' : '') +
-    '<p><b>Subject:</b> ' + escHtml(item.subject) + '</p><p style="white-space:pre-wrap">' + escHtml(item.body) + '</p>' +
+    (_workEditing === item.id
+      ? '<label class="form-label" for="work-subject">Subject</label><input id="work-subject" class="form-input" value="' + escHtml(item.subject) + '">' +
+        '<label class="form-label" for="work-body">Message</label><textarea id="work-body" class="form-input" rows="10">' + escHtml(item.body) + '</textarea>'
+      : '<p><b>Subject:</b> ' + escHtml(item.subject) + '</p><p style="white-space:pre-wrap">' + escHtml(item.body) + '</p>') +
     (item.context && safeHref(item.context.website) ? '<p><a href="' + safeHref(item.context.website) + '" target="_blank" rel="noopener noreferrer">Check company website</a></p>' : '') +
-    '<div class="btn-group"><button class="btn btn-secondary btn-sm" onclick="_workDraft=Math.max(0,_workDraft-1);loadCustomerWorkspace()" ' + (_workDraft ? '' : 'disabled') + '>Previous</button>' +
-    '<button class="btn btn-secondary btn-sm" onclick="_workDraft++;loadCustomerWorkspace()" ' + (_workDraft < drafts.length - 1 ? '' : 'disabled') + '>Next</button>' +
-    '<button class="btn btn-secondary btn-sm" onclick="_desk.i=_workDraft;goTab(\'outbox\')">Edit in Outbox</button>' +
-    '<button class="btn btn-secondary btn-sm" onclick="workspaceReview(\'reject\',' + jsq(item.id) + ')">Reject</button>' +
-    '<button class="btn btn-primary btn-sm" onclick="workspaceReview(\'approve\',' + jsq(item.id) + ')">Approve</button></div></div>' :
+    (_workEditing === item.id
+      ? '<div class="btn-group"><button class="btn btn-primary btn-sm" onclick="workspaceSave(' + jsq(item.id) + ')">Save changes</button>' +
+        '<button class="btn btn-secondary btn-sm" onclick="_workEditing=null;loadCustomerWorkspace()">Cancel</button></div>'
+      : '<div class="btn-group"><button class="btn btn-secondary btn-sm" onclick="_workDraft=Math.max(0,_workDraft-1);loadCustomerWorkspace()" ' + (_workDraft ? '' : 'disabled') + '>Previous</button>' +
+        '<button class="btn btn-secondary btn-sm" onclick="_workDraft++;loadCustomerWorkspace()" ' + (_workDraft < drafts.length - 1 ? '' : 'disabled') + '>Next</button>' +
+        '<button class="btn btn-secondary btn-sm" onclick="workspaceEdit(' + jsq(item.id) + ')">Edit</button>' +
+        '<button class="btn btn-secondary btn-sm" onclick="workspaceReview(\'reject\',' + jsq(item.id) + ')">Reject</button>' +
+        '<button class="btn btn-primary btn-sm" onclick="workspaceReview(\'approve\',' + jsq(item.id) + ')">Approve</button></div>' +
+        (!heldReason(item) ? '<label class="muted"><input type="checkbox" ' + (_workSelected.has(item.id) ? 'checked ' : '') +
+          'onchange="workspaceSelect(' + jsq(item.id) + ',this.checked)"> Select after reviewing this draft</label>' : '')) +
+    '</div><div class="btn-group" style="margin-top:8px"><button class="btn btn-secondary btn-sm" onclick="workspaceApproveSelected()">Approve selected (<span id="work-selected-count">' + _workSelected.size + '</span>)</button></div>' :
     '<p class="muted">No emails awaiting approval. Once a verified contact has a draft, it appears here.</p>';
 }
 
 // ── Live status: the "what's happening?" answer, kept on screen ──
+
+async function loadCustomerResults() {
+  const el = document.getElementById('customer-results');
+  if (!el) return;
+  const [contacts, outbox, replies] = await Promise.all([
+    api('/api/prospects'), api('/api/outbox'), api('/api/reply-queue')]);
+  if (!Array.isArray(contacts) || !outbox || outbox.error || !Array.isArray(replies)) {
+    el.innerHTML = offlineState(); return;
+  }
+  const bounced = contacts.filter(p => p.email_status === 'invalid');
+  const sent = outbox.sent || [];
+  const waiting = outbox.pending || [];
+  const card = (title, number, detail) => '<div class="card"><h3>' + title + '</h3><p style="font-size:24px">' + number + '</p><p class="muted">' + detail + '</p></div>';
+  el.innerHTML = '<div class="form-row">' +
+    card('Contacts', contacts.length, 'Most recent records') +
+    card('Needs approval', waiting.length, 'Review on Work') +
+    card('Recently sent', sent.length, 'Recent Outbox history') +
+    card('Replies needing attention', replies.length, 'Review and respond') +
+    '</div>' +
+    '<div class="subhead">Replies needing attention</div>' +
+    (replies.length ? '<div class="table-card"><table><thead><tr><th>Person</th><th>Company</th><th>Status</th></tr></thead><tbody>' +
+      replies.slice(0, 25).map(p => '<tr><td>' + escHtml([p.first_name, p.last_name].filter(Boolean).join(' ') || p.email) +
+        '</td><td>' + escHtml(p.company) + '</td><td>' + escHtml(p.intent || p.status) + '</td></tr>').join('') +
+      '</tbody></table></div><button class="btn btn-secondary btn-sm" onclick="goTab(\'conversations\')">Open replies</button>' :
+      '<p class="muted">No replies need attention.</p>') +
+    '<div class="subhead">Delivery problems</div>' +
+    (bounced.length ? '<div class="table-card"><table><thead><tr><th>Person</th><th>Company</th><th>Address</th></tr></thead><tbody>' +
+      bounced.slice(0, 25).map(p => '<tr><td>' + escHtml([p.first_name, p.last_name].filter(Boolean).join(' ')) +
+        '</td><td>' + escHtml(p.company) + '</td><td>' + escHtml(p.email) + '</td></tr>').join('') +
+      '</tbody></table></div>' : '<p class="muted">No invalid email addresses in recent contacts.</p>') +
+    '<div class="subhead">Recently sent</div>' +
+    (sent.length ? '<div class="table-card"><table><thead><tr><th>To</th><th>Subject</th><th>Sent</th></tr></thead><tbody>' +
+      sent.slice(0, 25).map(m => '<tr><td>' + escHtml(m.to_email) + '</td><td>' + escHtml(m.subject) +
+        '</td><td>' + escHtml(formatDate(m.sent_at)) + '</td></tr>').join('') + '</tbody></table></div>' :
+      '<p class="muted">No emails sent yet.</p>');
+}
 
 async function loadLiveStatus() {
   const el = document.getElementById('live-status');
@@ -3540,6 +3651,7 @@ setInterval(() => {
   if (document.hidden || _locked) return;
   switch (currentTab) {
     case 'today': loadToday(); loadCustomerWorkspace(); loadTrend(); loadFunnel(); loadRuns(); loadTodayActivity(); break;
+    case 'results': loadCustomerResults(); break;
     case 'companies': if (!companyDrill) loadCompanies(); break;
     case 'prospects': loadProspects(); break;
     case 'campaigns': loadCampaigns(); break;
